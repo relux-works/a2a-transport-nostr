@@ -1,0 +1,5 @@
+# Local scratch and test by-products; the library builds no binaries.
+.DS_Store
+*.test
+coverage.out
+*.prof

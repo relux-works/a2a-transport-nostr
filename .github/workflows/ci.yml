@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: '1.26.8'
+          check-latest: false
+          cache: false
+      - name: Fetch and verify pinned modules
+        run: |
+          go mod download
+          go mod verify
+      - name: Vet, race tests and build
+        env:
+          GOPROXY: 'off'
+          GOSUMDB: 'off'
+          GOTOOLCHAIN: local
+        run: |
+          go vet ./...
+          go test -race ./...
+          go build -trimpath ./...
