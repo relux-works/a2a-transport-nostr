@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -36,39 +37,59 @@ func (t *Transport) stateFor(cursor transport.Cursor) (cursorState, error) {
 	return c, nil
 }
 
-func (t *Transport) saveState(c cursorState) {
+// saveState installs the working cursor and persists it. A
+// persistence failure is returned: "no redelivery after restart"
+// only holds when this succeeds.
+func (t *Transport) saveState(c cursorState) error {
 	t.mu.Lock()
 	t.cursor = c
 	t.mu.Unlock()
-	_ = t.store.saveCursor(c)
+	if err := t.store.saveCursor(c); err != nil {
+		return fmt.Errorf("nostrtransport: persist cursor: %w", err)
+	}
+	return nil
 }
+
+// futureSkewSeconds bounds how far ahead of local time a wrap or
+// rumor may be stamped and still be processed now.
+const futureSkewSeconds = 900
 
 // processWrap unwraps and converts one gift wrap under a working
 // cursor state. Returns nil for seen/refused/tombstoned traffic.
+//
+// Cursor discipline (RN1-01 N1): the cursor and the seen sets are
+// touched only after the wrap is fully verified. A wrap or rumor
+// stamped beyond now+skew is held aside — not delivered, not
+// counted, cursor untouched — and re-checked on a later sync, so
+// a merely clock-skewed legitimate wrap still delivers once local
+// time catches up, while junk can never blind the sync. Since
+// advances only from verified, delivered events and never past
+// now.
 func (t *Transport) processWrap(state *cursorState, wrap *nostr.Event) *transport.Message {
 	now := t.nowUnix()
 	if state.seenWrap(wrap.ID) {
 		return nil
 	}
-	state.WrapIDs = appendBounded(state.WrapIDs, wrap.ID)
-	if wrap.CreatedAt > state.Since {
-		state.Since = wrap.CreatedAt
-	}
-	if wrap.CreatedAt > now+900 {
-		return nil // far-future: refused, never delivered
+	if wrap.CreatedAt > now+futureSkewSeconds {
+		return nil // held aside, re-checked on a later sync
 	}
 	unwrapped, err := nostr.UnwrapDM(wrap, t.cfg.Key)
 	if err != nil {
-		return nil
+		return nil // unverified: cursor and seen sets untouched
 	}
 	rumor := unwrapped.Rumor
-	if rumor.CreatedAt > now+900 {
-		return nil
+	if rumor.CreatedAt > now+futureSkewSeconds {
+		return nil // held aside like a future wrap
 	}
+	// Verified from here on; the wrap may be recorded as seen.
+	state.WrapIDs = appendBounded(state.WrapIDs, wrap.ID)
 	if state.seenRumor(rumor.ID) || state.tombstoned(rumor.ID) {
 		return nil
 	}
 	state.RumorIDs = appendBounded(state.RumorIDs, rumor.ID)
+	if adv := min(wrap.CreatedAt, now); adv > state.Since {
+		state.Since = adv
+	}
 
 	participants := map[string]bool{}
 	for _, tag := range rumor.Tags {
@@ -146,7 +167,9 @@ func (t *Transport) Sync(ctx context.Context, cursor transport.Cursor) ([]transp
 		}
 	}
 	sortMessages(msgs)
-	t.saveState(state)
+	if err := t.saveState(state); err != nil {
+		return msgs, encodeCursor(state), err
+	}
 	if !anyOK && firstErr != nil {
 		return msgs, encodeCursor(state), firstErr
 	}
@@ -174,17 +197,19 @@ func (t *Transport) Subscribe(ctx context.Context, cursor transport.Cursor,
 	filter := relay.Filter{Kinds: []int{nostr.KindGiftWrap},
 		PTags: []string{t.Identity()}, Since: &since}
 	var mu sync.Mutex
+	var saveErr error
 	live := func(subID string, ev *nostr.Event, eose bool) {
 		if eose || ev == nil {
 			return
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		if m := t.processWrap(&state, ev); m != nil {
-			t.saveState(state)
+		m := t.processWrap(&state, ev)
+		if err := t.saveState(state); err != nil && saveErr == nil {
+			saveErr = err
+		}
+		if m != nil {
 			handler(*m)
-		} else {
-			t.saveState(state)
 		}
 	}
 	var firstErr error
@@ -203,7 +228,9 @@ func (t *Transport) Subscribe(ctx context.Context, cursor transport.Cursor,
 		return encodeCursor(state), firstErr
 	}
 	<-ctx.Done()
-	return encodeCursor(state), ctx.Err()
+	mu.Lock()
+	defer mu.Unlock()
+	return encodeCursor(state), errors.Join(ctx.Err(), saveErr)
 }
 
 // Membership returns the conversation participant set (sender-side

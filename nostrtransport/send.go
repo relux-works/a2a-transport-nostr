@@ -2,6 +2,8 @@ package nostrtransport
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -43,41 +45,74 @@ func (t *Transport) SendFile(ctx context.Context, conv transport.ConversationID,
 	if len(t.cfg.BlossomServers) == 0 {
 		return "", transport.AckUnknown, fmt.Errorf("nostrtransport: no blossom servers configured")
 	}
-	// Idempotent build: replay the stored rumor (with its pinned
-	// key/URL) when the record already exists.
-	if rec, found, err := t.store.loadSend(idempotencyKey); err == nil && found {
-		_ = rec
-		return t.publishRecord(ctx, idempotencyKey, rec)
-	}
-	fc, err := nostr.EncryptFile(data)
-	if err != nil {
-		return "", transport.AckUnknown, err
-	}
-	var url string
-	for _, s := range t.cfg.BlossomServers {
-		_, u, err := t.blossom.Put(ctx, s, fc.Ciphertext)
-		if err == nil {
-			url = u
-			break
-		}
-	}
-	if url == "" {
-		return "", transport.AckUnknown, fmt.Errorf("nostrtransport: blossom upload failed on all servers")
-	}
-	opts := nostr.RumorOptions{Subject: cj.S, FileTags: fc.FileTags(url, mime)}
-	parts := []string{string(conv), "file", mime, url, fc.CipherSHA}
+	// The idempotency hash covers the plaintext, so the same key
+	// with different data conflicts in sendRumor before anything
+	// is built (RN1-01 N3). Encryption and upload happen lazily
+	// inside build, which sendRumor only calls on a store miss;
+	// a same-data retry replays the stored rumor (pinned key/URL).
+	sum := sha256.Sum256(data)
+	parts := []string{string(conv), "file", mime, hex.EncodeToString(sum[:])}
 	return t.sendRumor(ctx, cj, parts, idempotencyKey,
 		func() (*nostr.Event, error) {
+			fc, err := nostr.EncryptFile(data)
+			if err != nil {
+				return nil, err
+			}
+			var url string
+			for _, s := range t.cfg.BlossomServers {
+				_, u, err := t.blossom.Put(ctx, s, fc.Ciphertext)
+				if err == nil {
+					url = u
+					break
+				}
+			}
+			if url == "" {
+				return nil, fmt.Errorf("nostrtransport: blossom upload failed on all servers")
+			}
+			opts := nostr.RumorOptions{Subject: cj.S, FileTags: fc.FileTags(url, mime)}
 			return nostr.BuildRumor(t.cfg.Key, cj.P, nostr.KindFileMessage, url, opts, t.nowUnix())
 		})
 }
 
+// sendRumor coalesces concurrent sends under one idempotency
+// key (RN1-01 N4): the first caller owns the build/persist/
+// publish; concurrent callers wait for its result (or their own
+// ctx), and a caller whose content hash differs from the owner's
+// conflicts instead of silently taking the owner's ACK.
 func (t *Transport) sendRumor(ctx context.Context, cj convJSON, hashParts []string,
 	idempotencyKey string, build func() (*nostr.Event, error)) (string, transport.AckStatus, error) {
 	if idempotencyKey == "" {
 		return "", transport.AckUnknown, fmt.Errorf("nostrtransport: idempotency key required")
 	}
 	wantHash := contentHash(hashParts...)
+	t.sendMu.Lock()
+	if c, ok := t.inflight[idempotencyKey]; ok {
+		t.sendMu.Unlock()
+		if c.hash != wantHash {
+			return "", transport.AckUnknown, ErrIdempotencyConflict
+		}
+		select {
+		case <-c.done:
+			return c.id, c.ack, c.err
+		case <-ctx.Done():
+			return "", transport.AckUnknown, ctx.Err()
+		}
+	}
+	c := &sendCall{done: make(chan struct{}), hash: wantHash}
+	t.inflight[idempotencyKey] = c
+	t.sendMu.Unlock()
+	defer func() {
+		t.sendMu.Lock()
+		delete(t.inflight, idempotencyKey)
+		t.sendMu.Unlock()
+		close(c.done)
+	}()
+	c.id, c.ack, c.err = t.sendRumorOnce(ctx, cj, wantHash, idempotencyKey, build)
+	return c.id, c.ack, c.err
+}
+
+func (t *Transport) sendRumorOnce(ctx context.Context, cj convJSON, wantHash,
+	idempotencyKey string, build func() (*nostr.Event, error)) (string, transport.AckStatus, error) {
 	rec, found, err := t.store.loadSend(idempotencyKey)
 	if err != nil {
 		return "", transport.AckUnknown, err

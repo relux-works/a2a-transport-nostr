@@ -47,6 +47,16 @@ type convJSON struct {
 	S string   `json:"s,omitempty"`
 }
 
+// sendCall is one in-flight coalesced send: the owner fills the
+// result, waiters on done receive it (RN1-01 N4).
+type sendCall struct {
+	done chan struct{}
+	hash string // owner's content hash; waiters must match
+	id   string
+	ack  transport.AckStatus
+	err  error
+}
+
 // Transport is the Nostr implementation of transport.Transport.
 type Transport struct {
 	cfg     Config
@@ -57,6 +67,9 @@ type Transport struct {
 	clients map[string]*relay.Client
 	routes  map[string]routeEntry
 	cursor  cursorState
+
+	sendMu   sync.Mutex
+	inflight map[string]*sendCall
 }
 
 type routeEntry struct {
@@ -103,9 +116,10 @@ func New(cfg Config) (*Transport, error) {
 	}
 	return &Transport{
 		cfg: cfg, store: st, cursor: cur,
-		clients: map[string]*relay.Client{},
-		routes:  map[string]routeEntry{},
-		blossom: &blossom.Client{Signer: cfg.Key, Now: cfg.Now},
+		clients:  map[string]*relay.Client{},
+		routes:   map[string]routeEntry{},
+		inflight: map[string]*sendCall{},
+		blossom:  &blossom.Client{Signer: cfg.Key, Now: cfg.Now},
 	}, nil
 }
 
@@ -187,7 +201,10 @@ func (t *Transport) resolve(ctx context.Context, pubkey string) []string {
 			continue
 		}
 		for _, ev := range evs {
-			if nostr.VerifySignature(ev) != nil {
+			// Pin the author to the queried pubkey: a relay must
+			// not redirect routing with somebody else's signed
+			// relay list (RN1-01 N2).
+			if ev.PubKey != pubkey || nostr.VerifySignature(ev) != nil {
 				continue
 			}
 			switch ev.Kind {

@@ -2,7 +2,11 @@ package nostrtransport_test
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -597,5 +601,253 @@ func TestSameRumorTwoWrapsDedup(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("rumor surfaced %d times under two wraps", count)
+	}
+}
+
+// The tests below pin the RN1-01 revision: an unverified or
+// far-future wrap must never advance the sync cursor or enter the
+// seen sets, routing must pin the relay-list author, file sends
+// conflict on different data, concurrent sends coalesce, and
+// cursor persistence failures must surface.
+
+// TestPoisonedWrapDoesNotBlindSync proves the N1 fix: one junk
+// kind-1059 wrap with created_at a decade ahead, p-tagged to the
+// victim and signed by a stranger, neither delivers, nor advances
+// the cursor, nor blinds later legitimate traffic — before or
+// after a restart from the persisted state.
+func TestPoisonedWrapDoesNotBlindSync(t *testing.T) {
+	w := newWorld(t)
+	a, b := w.transport("alice"), w.transport("bob")
+	conv := a.NewConversation([]string{w.pub("bob")}, "")
+
+	poison := &nostr.Event{
+		CreatedAt: time.Now().Unix() + 10*365*24*3600,
+		Kind:      nostr.KindGiftWrap,
+		Tags:      [][]string{{"p", w.pub("bob")}},
+		Content:   "not even ciphertext",
+	}
+	if err := w.keys["mallory"].SignEvent(poison); err != nil {
+		t.Fatal(err)
+	}
+	publishRaw(t, w, poison)
+
+	if msgs, _, err := b.Sync(ctx(), nil); err != nil || len(msgs) != 0 {
+		t.Fatalf("poison sync = %v msgs, err %v; want 0/nil", msgs, err)
+	}
+	id, ack, err := a.Send(ctx(), conv, transport.Outgoing{Content: "after poison"}, "p-1")
+	if err != nil || ack != transport.AckOK {
+		t.Fatalf("legit send after poison = %v %v", ack, err)
+	}
+	msgs, _, err := b.Sync(ctx(), nil)
+	if err != nil || len(msgs) != 1 || msgs[0].ID != id {
+		t.Fatalf("legit traffic blinded by poison: %v %v", msgs, err)
+	}
+
+	b.Close()
+	b2 := w.transport("bob") // persisted cursor must not be poisoned
+	if msgs, _, err := b2.Sync(ctx(), nil); err != nil || len(msgs) != 0 {
+		t.Fatalf("restart redelivered or errored: %v %v", msgs, err)
+	}
+	id2, _, err := a.Send(ctx(), conv, transport.Outgoing{Content: "after restart"}, "p-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, _, err = b2.Sync(ctx(), nil)
+	if err != nil || len(msgs) != 1 || msgs[0].ID != id2 {
+		t.Fatalf("traffic after restart blinded: %v %v", msgs, err)
+	}
+}
+
+// TestSkewedLegitWrapEventuallyDelivers proves a legitimate wrap
+// from a clock-skewed sender is held aside — not delivered, not
+// counted, not cursor-advancing — while normal traffic flows, and
+// delivers once local time catches up into the acceptance window.
+func TestSkewedLegitWrapEventuallyDelivers(t *testing.T) {
+	w := newWorld(t)
+	base := time.Now().Unix()
+	var bobNow atomic.Int64
+	bobNow.Store(base)
+	mk := func(name string, nowFn func() time.Time) *nostrtransport.Transport {
+		tr, err := nostrtransport.New(nostrtransport.Config{
+			Key: w.keys[name], StateDir: w.dirs[name],
+			ReadRelays: []string{w.relay.URL}, WriteRelays: []string{w.relay.URL},
+			BlossomServers: []string{w.blossom.URL}, Now: nowFn,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { tr.Close() })
+		return tr
+	}
+	skewed := mk("alice", func() time.Time { return time.Unix(base+3600, 0) })
+	b := mk("bob", func() time.Time { return time.Unix(bobNow.Load(), 0) })
+	c := w.transport("carol")
+
+	conv := skewed.NewConversation([]string{w.pub("bob")}, "")
+	if _, ack, err := skewed.Send(ctx(), conv,
+		transport.Outgoing{Content: "from one hour ahead"}, "sk-1"); err != nil || ack != transport.AckOK {
+		t.Fatalf("skewed send = %v %v", ack, err)
+	}
+	if _, _, err := c.Send(ctx(), c.NewConversation([]string{w.pub("bob")}, ""),
+		transport.Outgoing{Content: "right on time"}, "sk-2"); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _, err := b.Sync(ctx(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contents []string
+	for _, m := range msgs {
+		contents = append(contents, m.Content)
+	}
+	if len(contents) != 1 || contents[0] != "right on time" {
+		t.Fatalf("before catch-up delivered %v, want only the on-time neighbour", contents)
+	}
+
+	bobNow.Store(base + 3600 + 60)
+	msgs, _, err = b.Sync(ctx(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "from one hour ahead" ||
+		msgs[0].Sender != w.pub("alice") {
+		t.Fatalf("skewed wrap lost after catch-up: %v", msgs)
+	}
+	if msgs, _, err := b.Sync(ctx(), nil); err != nil || len(msgs) != 0 {
+		t.Fatalf("skewed wrap redelivered: %v %v", msgs, err)
+	}
+}
+
+// TestResolveIgnoresForeignRelayList proves N2: when a relay
+// answers the authors query with a stranger's kind 10050 pointing
+// at a dead relay, routing ignores it (author pinned to the
+// queried pubkey) and the send still lands via the fallback.
+func TestResolveIgnoresForeignRelayList(t *testing.T) {
+	w := newWorldOpts(t, testrelay.Options{LooseAuthors: true})
+	dead, err := nostr.BuildDMRelaysEvent(w.keys["mallory"],
+		[]string{"ws://127.0.0.1:1"}, time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishRaw(t, w, dead)
+
+	a, b := w.transport("alice"), w.transport("bob")
+	conv := a.NewConversation([]string{w.pub("bob")}, "")
+	id, ack, err := a.Send(ctx(), conv, transport.Outgoing{Content: "not redirected"}, "r-1")
+	if err != nil || ack != transport.AckOK {
+		t.Fatalf("send redirected by foreign relay list: ack %v err %v", ack, err)
+	}
+	msgs, _, err := b.Sync(ctx(), nil)
+	if err != nil || len(msgs) != 1 || msgs[0].ID != id {
+		t.Fatalf("message lost under foreign relay list: %v %v", msgs, err)
+	}
+}
+
+// TestSendFileIdempotencyConflict proves N3: the same idempotency
+// key with different file data refuses, while a same-data retry
+// replays the stored message without new relay traffic.
+func TestSendFileIdempotencyConflict(t *testing.T) {
+	w := newWorld(t)
+	a := w.transport("alice")
+	conv := a.NewConversation([]string{w.pub("bob")}, "")
+	id1, ack, err := a.SendFile(ctx(), conv, "text/plain", []byte("version one"), "f-key")
+	if err != nil || ack != transport.AckOK {
+		t.Fatalf("first SendFile = %v %v", ack, err)
+	}
+	if _, _, err := a.SendFile(ctx(), conv, "text/plain", []byte("version TWO"), "f-key"); !errors.Is(err, nostrtransport.ErrIdempotencyConflict) {
+		t.Fatalf("different data under same key = %v, want ErrIdempotencyConflict", err)
+	}
+	before := len(w.relay.Events())
+	id2, ack, err := a.SendFile(ctx(), conv, "text/plain", []byte("version one"), "f-key")
+	if err != nil || ack != transport.AckOK || id2 != id1 {
+		t.Fatalf("same-data retry = %q %v %v, want stored id ACK", id2, ack, err)
+	}
+	if got := len(w.relay.Events()); got != before {
+		t.Fatalf("retry stored new events: %d -> %d", before, got)
+	}
+}
+
+// TestConcurrentSendSameKeyCoalesced proves N4: concurrent Send
+// calls with one idempotency key run one owner — every caller
+// gets the same id/ACK and exactly one wrap per recipient exists;
+// concurrent different content under the key yields one winner
+// and a conflict for the loser.
+func TestConcurrentSendSameKeyCoalesced(t *testing.T) {
+	w := newWorld(t)
+	a, b := w.transport("alice"), w.transport("bob")
+	conv := a.NewConversation([]string{w.pub("bob")}, "")
+
+	const n = 8
+	ids := make([]string, n)
+	acks := make([]transport.AckStatus, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ids[i], acks[i], errs[i] = a.Send(ctx(), conv,
+				transport.Outgoing{Content: "exactly once"}, "conc-1")
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		if errs[i] != nil || acks[i] != transport.AckOK || ids[i] == "" || ids[i] != ids[0] {
+			t.Fatalf("caller %d = id %q ack %v err %v (id0 %q)", i, ids[i], acks[i], errs[i], ids[0])
+		}
+	}
+	wraps := 0
+	for _, ev := range w.relay.Events() {
+		if ev.Kind == nostr.KindGiftWrap {
+			wraps++
+		}
+	}
+	if wraps != 2 { // bob + alice self-copy
+		t.Fatalf("relay holds %d wraps, want 2 (one per recipient)", wraps)
+	}
+	msgs, _, err := b.Sync(ctx(), nil)
+	if err != nil || len(msgs) != 1 || msgs[0].ID != ids[0] {
+		t.Fatalf("delivered = %v %v, want exactly the coalesced message", msgs, err)
+	}
+
+	var wg2 sync.WaitGroup
+	res := make([]error, 2)
+	for i, content := range []string{"winner A", "winner B"} {
+		wg2.Add(1)
+		go func(i int, content string) {
+			defer wg2.Done()
+			_, _, res[i] = a.Send(ctx(), conv, transport.Outgoing{Content: content}, "conc-2")
+		}(i, content)
+	}
+	wg2.Wait()
+	okCount, conflictCount := 0, 0
+	for _, err := range res {
+		switch {
+		case err == nil:
+			okCount++
+		case errors.Is(err, nostrtransport.ErrIdempotencyConflict):
+			conflictCount++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if okCount != 1 || conflictCount != 1 {
+		t.Fatalf("different-content race: %d ok, %d conflict; want 1/1", okCount, conflictCount)
+	}
+}
+
+// TestSyncSurfacesCursorSaveError proves N5: when the cursor
+// cannot be persisted, Sync reports the failure instead of
+// silently degrading to redelivery-after-restart.
+func TestSyncSurfacesCursorSaveError(t *testing.T) {
+	w := newWorld(t)
+	b := w.transport("bob")
+	dir := w.dirs["bob"]
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0700)
+	if _, _, err := b.Sync(ctx(), nil); err == nil {
+		t.Fatal("Sync swallowed the cursor persistence failure")
 	}
 }

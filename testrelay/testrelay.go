@@ -79,6 +79,10 @@ type Options struct {
 	RequireAuth bool // NIP-42: challenge every connection first
 	// OKMode: "" normal, "reject" (OK false blocked:), "silent" (never answer OK).
 	OKMode string
+	// LooseAuthors makes REQ matching ignore the authors filter,
+	// like a malicious or buggy relay that answers an author query
+	// with somebody else's events.
+	LooseAuthors bool
 }
 
 // Relay is the test relay server.
@@ -262,6 +266,9 @@ func (r *Relay) dispatch(c *conn, raw []byte) {
 		for _, fr := range msg[2:] {
 			var f Filter
 			if err := json.Unmarshal(fr, &f); err == nil {
+				if r.opts.LooseAuthors {
+					f.Authors = nil
+				}
 				filters = append(filters, &f)
 			}
 		}
