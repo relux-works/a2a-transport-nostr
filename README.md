@@ -43,10 +43,11 @@ No upstream source is patched. See `UNRESOLVED_QUESTIONS.md` for upstream
 - Explicit `To` restricts delivery to those recipients plus self, deduplicated;
   empty `To` addresses the whole conversation. Delivery starts with self, then
   explicit recipients in order.
-- ACK requires an actual `OK true` for **every party including self** from
-  one of its pinned routes. `OK true` with `duplicate:` counts; `OK false`
-  with `duplicate:` remains UNKNOWN on this seam. The legacy API retains its
-  earlier duplicate classification.
+- ACK requires an original relay response classified as stored for **every
+  party including self** from one of its pinned routes: either `OK true` or
+  `OK false` with a `duplicate:` reason. Both confirm the exact wrap ID under
+  the same relay-trust assumption; no other `OK false` becomes an ACK.
+  A lost-ACK retry reuses the stored wrap and accepts either duplicate form.
 - Retries reuse the same rumor ID and byte-identical wraps and skip ACKed
   parties. Only ACK includes an EventID. Partial publication or missing answers
   give UNKNOWN without Event/Refusal. Only closed `blocked:`, `invalid:` or

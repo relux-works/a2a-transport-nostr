@@ -36,6 +36,7 @@ func main() {
 	}
 	must(os.MkdirAll(dest, 0700))
 	plants := []plant{
+		{"stored-duplicate", "nostrtransport/adapter_send.go", "ok.Original && ok.Stored()", "ok.Original && ok.Accepted", "TestSeamDuplicateRecovery/false-duplicate", "stored duplicate did not ACK original event"},
 		{"drop-key", "nostrtransport/adapter_send.go", "name := sendFileName(req.IdempotencyKey)", "req.IdempotencyKey += time.Now().String(); name := sendFileName(req.IdempotencyKey)", "TestUpstreamConformance/send_idempotency", "idempotency key retry created a second logical event"},
 		{"wrap-sender", "nostrtransport/adapter_sync.go", "Sender: PrincipalID(dm.SenderHex)", "Sender: PrincipalID(dm.WrapperHex)", "TestSeamSenderIsSeal", "sender is not authenticated seal signer"},
 		{"foreign-reset", "nostrtransport/adapter_sync.go", "c.Identity != a.core.Identity()", "false", "TestUpstreamConformance/cursors", "foreign or invalid cursor accepted"},

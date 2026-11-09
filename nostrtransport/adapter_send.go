@@ -279,7 +279,7 @@ func (a *Adapter) publish(ctx context.Context, name string, rec *seamSend, targe
 			call, cancel := context.WithTimeout(ctx, 3*time.Second)
 			ok, e := a.publishEvent(call, u, part.Wrap)
 			cancel()
-			if e == nil && ok.Original && ok.Accepted {
+			if e == nil && ok.Original && ok.Stored() {
 				part.Ack = true
 				delete(part.Uncertain, u)
 			} else if e == nil && ok.Original && definiteReason(ok.Reason) && !prior {

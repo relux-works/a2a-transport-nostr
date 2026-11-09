@@ -303,9 +303,9 @@ func TestSeamPartialRestart(t *testing.T) {
 	}
 }
 
-// Definite original refusal differs from lost ACK, false duplicate and timeout.
+// Definite original refusal differs from partial delivery, lost ACK and timeout.
 func TestSeamRefusalTable(t *testing.T) {
-	for _, mode := range []string{"reject", "partial-reject", "after-submit", "silent", "false-duplicate"} {
+	for _, mode := range []string{"reject", "partial-reject", "after-submit", "silent"} {
 		t.Run(mode, func(t *testing.T) {
 			w := newSeamWorld(t)
 			if mode == "reject" {
@@ -314,8 +314,6 @@ func TestSeamRefusalTable(t *testing.T) {
 				}
 			} else if mode == "partial-reject" {
 				w.r.SetRecipientMode(w.b.core.Identity(), "reject")
-			} else if mode == "false-duplicate" {
-				w.r.SetRecipientMode(w.b.core.Identity(), "after-submit")
 			} else {
 				w.r.SetRecipientMode(w.b.core.Identity(), mode)
 			}
@@ -331,13 +329,6 @@ func TestSeamRefusalTable(t *testing.T) {
 			}
 			if r.Outcome != want {
 				t.Fatalf("want %s got %s", want, r.Outcome)
-			}
-			if mode == "false-duplicate" {
-				w.r.SetRecipientMode(w.b.core.Identity(), mode)
-				r, e = w.a.Send(context.Background(), SendRequest{Conversation: w.conv, Message: Message{Text: "x"}, IdempotencyKey: "same"})
-				if e != nil || r.Outcome != UNKNOWN {
-					t.Fatal("false duplicate acknowledged")
-				}
 			}
 			if mode == "after-submit" {
 				w.r.SetRecipientMode(w.b.core.Identity(), "reject")
@@ -634,5 +625,80 @@ func TestSeamLegacyStateRefused(t *testing.T) {
 	after, _ := os.ReadFile(w.sentinel)
 	if !bytes.Equal(before, after) {
 		t.Fatal("sibling state touched")
+	}
+}
+
+// A real relay stores B's wrap but loses its first ACK. After sender restart,
+// either duplicate reply form acknowledges that exact wrap. Retry preserves the
+// rumor and all wraps, skips ACKed self, and delivers one logical event per party.
+func TestSeamDuplicateRecovery(t *testing.T) {
+	for _, mode := range []string{"false-duplicate", "true-duplicate"} {
+		t.Run(mode, func(t *testing.T) {
+			w := newSeamWorld(t)
+			w.r.SetRecipientMode(w.b.core.Identity(), "after-submit")
+			req := SendRequest{Conversation: w.conv, Message: Message{Text: "duplicate recovery"}, IdempotencyKey: "duplicate-recovery"}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			first, e := w.a.Send(ctx, req)
+			cancel()
+			if e != nil || first.Outcome != UNKNOWN || first.Event != "" || first.Refusal != (seam.Refusal{}) {
+				t.Fatal("lost ACK was not uncertain", e)
+			}
+			read := func() seamSend {
+				t.Helper()
+				raw, e := readPrivate(filepath.Join(w.a.dir, "seam-send", sendFileName(req.IdempotencyKey)), 2<<20)
+				if e != nil {
+					t.Fatal(e)
+				}
+				var rec seamSend
+				if e = json.Unmarshal(raw, &rec); e != nil {
+					t.Fatal(e)
+				}
+				return rec
+			}
+			before := read()
+			self := w.a.core.Identity()
+			peer := w.b.core.Identity()
+			if !before.Parts[self].Ack || before.Parts[peer].Ack || w.r.Attempts(before.Parts[peer].Wrap.ID) != 1 {
+				t.Fatal("lost ACK fixture not exercised")
+			}
+			w.a.Close()
+			w.a, e = Open(w.configs[0])
+			if e != nil {
+				t.Fatal(e)
+			}
+			restarted := w.a
+			t.Cleanup(func() { restarted.Close() })
+			w.r.SetRecipientMode(peer, mode)
+			second, e := w.a.Send(context.Background(), req)
+			if e != nil || second.Outcome != ACK || second.Event != EventID(before.Rumor.ID) || second.Refusal != (seam.Refusal{}) {
+				t.Fatal("stored duplicate did not ACK original event", e)
+			}
+			after := read()
+			for principal, part := range before.Parts {
+				x, _ := json.Marshal(part.Wrap)
+				y, _ := json.Marshal(after.Parts[principal].Wrap)
+				if !bytes.Equal(x, y) || !after.Parts[principal].Ack {
+					t.Fatal("duplicate retry changed wrap or lost ACK")
+				}
+				want := 1
+				if principal == peer {
+					want = 2
+				}
+				if w.r.Attempts(part.Wrap.ID) != want {
+					t.Fatal("duplicate retry republished wrong recipient")
+				}
+			}
+			calls := w.r.Calls()
+			third, e := w.a.Send(context.Background(), req)
+			if e != nil || third.Outcome != ACK || third.Event != second.Event || w.r.Calls() != calls {
+				t.Fatal("ACK retry published again")
+			}
+			for _, receiver := range []*Adapter{w.a, w.b, w.c} {
+				batch, e := receiver.Sync(context.Background(), nil, SyncOptions{Initial: true})
+				if e != nil || len(batch.Events) != 1 || batch.Events[0].ID != second.Event || batch.Events[0].Message.Text != req.Message.Text {
+					t.Fatal("duplicate recovery delivery not exactly once", e)
+				}
+			}
+		})
 	}
 }

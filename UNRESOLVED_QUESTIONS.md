@@ -4,7 +4,7 @@
 
 N2-02 binds actual landed T0 commit
 `627be63050714d918fcb9fcfbaa348b70e0b104b` with no upstream modifications.
-All 20 upstream groups pass locally. Independent review and orchestrator-owned
+All 20 upstream groups pass locally. Independent review and maintainer-owned
 hosted checks/landing remain separate gates.
 
 The following observations concern `transport/conformancetest/conformance.go`
@@ -27,10 +27,6 @@ at that exact upstream commit. They are not adapter workarounds:
   sender of every other event. Local `TestSeamImpersonationNeighbors` checks
   the whole delivery set, sender, marker and two existing-principal claims.
   That supplemental evidence is not an upstream #381 resolution.
-- `event_message` compares fields only inside the matching-ID loop and does
-  not require that event to be present. Other delivery groups help, but do
-  not prove this payload-bearing event was delivered. The adapter's separate
-  kind-15 file roundtrip test requires the actual received attachment.
 - `outcome_discipline`'s pre-submit hook returns a context; this harness uses
   actual cancellation before any submission. It proves that concrete failure
   path, not every possible transient setup/transport failure. No marker-based
