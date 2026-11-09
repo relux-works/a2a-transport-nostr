@@ -37,6 +37,16 @@ func main() {
 	}
 	must(os.MkdirAll(dest, 0700))
 	plants := []plant{
+		{"raw-hook-missing", "nostrtransport/adapter_test.go", "ReceivedRawAtSize:      func(n int) EventID { return w.receivedRawAtSize(t, n) }", "ReceivedRawAtSize: nil", "TestConformanceRawHookPresent", "missing ReceivedRawAtSize hook"},
+		{"raw-hook-small-event", "nostrtransport/adapter_test.go", "return w.receivedRawAtSize(t, n)", "return w.inject(t, \"\", \"small-wire-control\", time.Now())", "TestUpstreamConformance/raw_bounds/received", "oversized received event delivered"},
+		{"raw-capability-nonzero", "nostrtransport/adapter.go", "MaxRawBytes: 0", "MaxRawBytes: maxRawBytes", "TestUpstreamConformance/raw_bounds/received", "want exactly one"},
+		{"raw-exposure", "nostrtransport/adapter_sync.go", "return Event{ID: s.ID", "return Event{Raw: []byte(\"exposed\"), ID: s.ID", "TestUpstreamConformance/raw_bounds", "Event.Raw exceeds MaxRawBytes declared by Caps"},
+		{"drain-disabled", "relay/client.go", "conn.SetReadLimit(MaxDrainBytes)", "conn.SetReadLimit(MaxFrameBytes)", "TestSeamOversizedMailbox", "oversized mailbox caused gap"},
+		{"drain-counter", "relay/client.go", "dropped++", "dropped += 0", "TestSeamOversizedMailbox", "oversized mailbox lost neighbors or drop accounting"},
+		{"batch-drop-counter", "nostrtransport/adapter_sync.go", "out.Dropped += dropped", "out.Dropped += 0", "TestSeamOversizedMailbox", "oversized mailbox lost neighbors or drop accounting"},
+		{"drain-memory", "relay/frame.go", "drainScratchBytes     = 4096", "drainScratchBytes = MaxDrainBytes", "TestDrainMemoryBound", "drain allocations exceed fixed scratch budget"},
+		{"drain-cancellation", "relay/client.go", "c.Close()\n\tcase <-c.PumpErr():", "// planted: leave partial drain open\n\tcase <-c.PumpErr():", "TestDrainCancellation", "cancelled drain left socket open"},
+
 		{"principal-hook-missing", "nostrtransport/adapter_test.go", "PrincipalReferences:    w.principalReferences", "PrincipalReferences:    nil", "TestConformanceReferenceHooks", "missing PrincipalReferences hook"},
 		{"conversation-hook-missing", "nostrtransport/adapter_test.go", "ConversationReferences: w.conversationReferences", "ConversationReferences: nil", "TestConformanceReferenceHooks", "missing ConversationReferences hook"},
 		{"principal-hook-valid-twice", "nostrtransport/adapter_conformance_test.go", "return w.b.core.Identity(), unsupportedNpub", "return w.b.core.Identity(), w.b.core.Identity()", "TestUpstreamConformance/addressing/principal_references", "invalid principal reference accepted"},
@@ -75,7 +85,11 @@ func main() {
 		}
 		must(os.WriteFile(path, []byte(strings.Replace(string(raw), p.Before, p.After, 1)), 0600))
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "./nostrtransport", "-run", "^"+p.Test+"$", "-v")
+		pkg := "./nostrtransport"
+		if p.Test == "TestDrainMemoryBound" || p.Test == "TestDrainCancellation" {
+			pkg = "./relay"
+		}
+		cmd := exec.CommandContext(ctx, "go", "test", "-count=1", pkg, "-run", "^"+p.Test+"$", "-v")
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "GOWORK=off")
 		var output bytes.Buffer

@@ -216,7 +216,7 @@ func (a *Adapter) Self(ctx context.Context) (Principal, error) {
 	return Principal{ID: PrincipalID(a.core.Identity())}, nil
 }
 func (a *Adapter) Caps() Capabilities {
-	return Capabilities{Redaction: redactionNone, Membership: membershipSenderSide, Threads: true, IdempotentRetry: true, MaxContentBytes: seamMaxContent}
+	return Capabilities{Redaction: redactionNone, Membership: membershipSenderSide, Threads: true, IdempotentRetry: true, MaxContentBytes: seamMaxContent, MaxRawBytes: 0}
 }
 func (a *Adapter) ConversationCaps(ctx context.Context, c ConversationID) (ConversationCaps, error) {
 	a.mu.Lock()

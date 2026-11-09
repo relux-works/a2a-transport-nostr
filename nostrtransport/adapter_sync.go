@@ -100,8 +100,10 @@ func (a *Adapter) syncLocked(ctx context.Context, from Cursor, opt SyncOptions) 
 	allOK := true
 	for _, u := range urls {
 		call, cancel := context.WithTimeout(ctx, 3*time.Second)
-		evs, err := a.core.clientFor(u).QueryBounded(call, "seam-sync", relay.Filter{Kinds: []int{nostr.KindGiftWrap}, PTags: []string{a.core.Identity()}, Since: &since, Limit: seamSeenLimit}, seamSeenLimit)
+		evs, dropped, err := a.core.clientFor(u).QueryBoundedWithDrops(call, "seam-sync", relay.Filter{Kinds: []int{nostr.KindGiftWrap}, PTags: []string{a.core.Identity()}, Since: &since, Limit: seamSeenLimit}, seamSeenLimit)
 		cancel()
+		out.Dropped += dropped
+		a.dropped += uint64(dropped)
 		if err != nil {
 			allOK = false
 			if errors.Is(err, relay.ErrQueryLimit) {

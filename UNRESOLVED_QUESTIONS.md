@@ -1,37 +1,23 @@
 # Pending integration and explicit limits
 
-## N3a partial qualification and upstream #416
+## T0 qualification at db64f2d1
 
-N3a binds actual upstream commit
-`0f73388cbc7ac3e719475a82c6f669e60851d116` with no upstream modifications.
-All 20 top-level conformance groups and both addressing reference subgroups
-pass locally. `raw_bounds/received` is the **one allowed explicit SKIP**,
-pending upstream contract ruling integration (#416). Independent review,
-maintainer-owned hosted checks and landing remain separate gates.
+The adapter passes T0 conformance at upstream
+`db64f2d1b23b1d40db9a22c0c515a186a266638d` with zero SKIPs in local fixtures.
+The upstream runner is unchanged. Actual addressing references and the genuine
+ReceivedRawAtSize hook exercise all 20 top-level groups and receive/addressing
+subgroups. The former #416 integration gap is closed: Caps.MaxRawBytes is zero,
+Raw stays nil, and the wire-size probe uses a signed authenticated event through
+the real test relay. Review, hosted checks and landing remain separate gates.
 
-The addressing hooks now supply this adapter's real supported/unsupported
-grammar rather than relying on upstream synthetic marker strings. The
-principal hook supplies canonical B hex versus a genuine unsupported npub;
-the conversation hook supplies canonical shared JSON versus invalid JSON.
-The updated upstream unverifiable-sender group also rejects any delivered
-event attributed to the claimed B, even when the forged event ID is rewritten.
-
-At this exact pin, `ReceivedRawAtSize(MaxRawBytes)` must produce an authenticated
-event with exactly 1 MiB of returned Raw on Sync, History and Event. This conflicts
-with the adapter's intentional empty Raw projection and 256 KiB relay frame and
-saved-event read ceilings. Padding an Event, bypassing the real relay, or changing
-only test limits would not establish the requested behavior. The hook remains
-nil and its skipped checks are unverified, never reported as passed. The existing
-local oversized signed-wrap test exercises the receive verifier directly; it
-makes no >1 MiB relay round-trip claim.
-
-Upstream has ruled that Raw is optional and a lower transport-declared Raw
-ceiling is allowed. Planned #416 adds `Caps.MaxRawBytes`: zero requires empty
-Raw, positive values declare an exposed Raw bound. The wire ceiling remains a
-separate limit. That API is not present at the pinned commit and is not assumed
-by this adapter. Follow-up requires the landed upstream head and honest receive
-controls under that contract before claiming zero SKIPs. No Raw exposure,
-privacy-policy change or wire/cache limit expansion is authorized by N3a.
+The receive path retains its 256 KiB normal-message ceiling. Oversized messages
+through 1 MiB + 64 KiB of NIP-01 framing allowance are streamed, discarded and
+counted for the active subscription only after complete draining. The reader
+retains a 256 KiB + 1 byte prefix plus 4 KiB scratch. Above that inclusive drain
+ceiling, or on interruption, connection loss remains an honest gap, not a
+completed drop. History refuses an incomplete scan; Event refuses the oversized
+ID. A relay repeatedly sending above-ceiling messages can still deny service.
+No Raw exposure or cache-size expansion is needed or claimed.
 
 The pre-submit hook uses actual cancellation before submission. It proves that
 concrete failure path, not all transient setup/transport failures. No
@@ -61,7 +47,8 @@ marker-based special case or synthetic SendResult is used.
   untrusted shared directories/network filesystems are not an isolation boundary.
 - The canonical principal surface accepts lowercase 64-hex keys only. Friendly
   npub/display-name resolution is not claimed by this adapter.
-- Legacy APIs remain available separately and retain their prior behavior;
+- Legacy APIs remain available separately with their existing API semantics;
+  they share the bounded relay reader but do not expose its new drop telemetry;
   callers needing T0 guarantees must construct the new adapter.
 
 - Provisional state is not silently migrated. Old journals for requests with

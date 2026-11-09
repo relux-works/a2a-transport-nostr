@@ -50,14 +50,15 @@ type Client struct {
 	// AuthKey, when set, answers NIP-42 AUTH challenges.
 	AuthKey *nostr.PrivKey
 
-	mu      sync.Mutex
-	conn    *websocket.Conn
-	waiters map[string]chan OKResult
-	subs    map[string]Filter
-	handler EventHandler
-	hctx    context.Context
-	pumpErr chan error
-	now     func() time.Time
+	mu          sync.Mutex
+	conn        *websocket.Conn
+	waiters     map[string]chan OKResult
+	subs        map[string]Filter
+	dropHandler func(string)
+	handler     EventHandler
+	hctx        context.Context
+	pumpErr     chan error
+	now         func() time.Time
 }
 
 // Dial connects and starts the pump (idempotent).
@@ -72,7 +73,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	conn.SetReadLimit(256 << 10)
+	conn.SetReadLimit(MaxDrainBytes)
 	c.conn = conn
 	c.waiters = map[string]chan OKResult{}
 	c.subs = map[string]Filter{}
@@ -106,6 +107,7 @@ func (c *Client) writeJSON(v any) error {
 }
 
 func (c *Client) pump(conn *websocket.Conn) {
+	defer conn.Close()
 	var pumpErr error
 	defer func() {
 		c.mu.Lock()
@@ -128,11 +130,30 @@ func (c *Client) pump(conn *websocket.Conn) {
 			errCh <- pumpErr
 		}
 	}()
+	frame := make([]byte, MaxFrameBytes+1)
 	for {
-		_, raw, err := conn.ReadMessage()
+		_, reader, err := conn.NextReader()
 		if err != nil {
 			pumpErr = err
 			return
+		}
+		raw, discarded, err := readFrame(reader, frame)
+		if err != nil {
+			pumpErr = err
+			return
+		}
+		if discarded {
+			// Only a recognizable EVENT prefix for a registered subscription
+			// is attributable. No signature or delivery is inferred from it.
+			id := discardedSubscription(raw)
+			c.mu.Lock()
+			drop := c.dropHandler
+			_, subscribed := c.subs[id]
+			c.mu.Unlock()
+			if subscribed && drop != nil {
+				drop(id)
+			}
+			continue
 		}
 		var msg []json.RawMessage
 		if json.Unmarshal(raw, &msg) != nil || len(msg) < 1 {
@@ -282,11 +303,16 @@ func (c *Client) publishOnce(ctx context.Context, ev *nostr.Event) (OKResult, er
 // Subscribe registers a handler and sends one REQ. Events and EOSE
 // arrive through the pump. Use Unsubscribe to CLOSE.
 func (c *Client) Subscribe(ctx context.Context, subID string, f Filter, h EventHandler) error {
+	return c.subscribe(ctx, subID, f, h, nil)
+}
+
+func (c *Client) subscribe(ctx context.Context, subID string, f Filter, h EventHandler, drop func(string)) error {
 	if err := c.Dial(ctx); err != nil {
 		return err
 	}
 	c.mu.Lock()
 	c.handler = h
+	c.dropHandler = drop
 	c.hctx = ctx
 	if c.subs == nil {
 		c.subs = map[string]Filter{}
@@ -318,15 +344,25 @@ func (c *Client) Query(ctx context.Context, subID string, f Filter) ([]*nostr.Ev
 // QueryBounded returns a detached bounded snapshot and closes its callback on
 // timeout/failure. A delayed callback cannot race with or mutate returned data.
 func (c *Client) QueryBounded(ctx context.Context, subID string, f Filter, limit int) ([]*nostr.Event, error) {
+	events, _, err := c.QueryBoundedWithDrops(ctx, subID, f, limit)
+	return events, err
+}
+
+// QueryBoundedWithDrops additionally counts fully drained oversized EVENT
+// messages attributable to this subscription before EOSE. This is rejection
+// telemetry, not authentication of the discarded body. Above-ceiling or
+// interrupted messages remain disconnects, never completed drops.
+func (c *Client) QueryBoundedWithDrops(ctx context.Context, subID string, f Filter, limit int) ([]*nostr.Event, int, error) {
 	if limit < 1 || limit > 4096 {
-		return nil, ErrQueryLimit
+		return nil, 0, ErrQueryLimit
 	}
 	var mu sync.Mutex
 	var out []*nostr.Event
 	var stopped, limited bool
+	dropped := 0
 	done := make(chan struct{})
 	var once sync.Once
-	err := c.Subscribe(ctx, subID, f, func(id string, ev *nostr.Event, eose bool) {
+	err := c.subscribe(ctx, subID, f, func(id string, ev *nostr.Event, eose bool) {
 		if id != subID {
 			return
 		}
@@ -349,9 +385,15 @@ func (c *Client) QueryBounded(ctx context.Context, subID string, f Filter, limit
 			}
 			out = append(out, ev)
 		}
+	}, func(id string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if id == subID && !stopped {
+			dropped++
+		}
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer func() { _ = c.Unsubscribe(subID) }()
 	if _, ok := ctx.Deadline(); !ok {
@@ -363,6 +405,9 @@ func (c *Client) QueryBounded(ctx context.Context, subID string, f Filter, limit
 	case <-done:
 	case <-ctx.Done():
 		err = ctx.Err()
+		// A peer can stall midway through a fragmented message. End this
+		// query's connection so its unfinished drain cannot affect a later REQ.
+		c.Close()
 	case <-c.PumpErr():
 		err = errors.New("relay: query disconnected")
 	}
@@ -372,7 +417,7 @@ func (c *Client) QueryBounded(ctx context.Context, subID string, f Filter, limit
 	if limited {
 		err = ErrQueryLimit
 	}
-	return append([]*nostr.Event(nil), out...), err
+	return append([]*nostr.Event(nil), out...), dropped, err
 }
 
 // PumpErr exposes the pump termination error (Subscribe loops).

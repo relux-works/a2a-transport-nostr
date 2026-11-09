@@ -20,17 +20,16 @@ write relay is required; defaults and authenticated discovery use the
 existing routing implementation. No public relay is contacted by default.
 
 The adapter imports `github.com/relux-works/a2a-swarm/transport` at
-`v0.0.0-20261109134727-0f73388cbc7a`, exactly upstream commit
-`0f73388cbc7ac3e719475a82c6f669e60851d116`. The pseudo-version and `go.sum`
+`v0.0.0-20261109151928-db64f2d1b23b`, exactly upstream commit
+`db64f2d1b23b1d40db9a22c0c515a186a266638d`. The pseudo-version and `go.sum`
 pin the source without a checkout-local replace. Package initialization
 registers `nostr`; `RegistrationError` exposes a registration conflict without
 panicking. The disposable provisional package has been deleted.
 
 `TestUpstreamConformance` invokes that commit's unchanged `conformancetest.Run`.
-At `0f73388cbc7ac3e719475a82c6f669e60851d116`, all 20 top-level groups and both
-addressing reference subgroups PASS. There is exactly one explicit SKIP:
-**`raw_bounds/received` — pending upstream contract ruling integration (#416)**.
-This is partial qualification, not an unqualified T0 conformance claim.
+The adapter passes T0 conformance at `db64f2d1b23b1d40db9a22c0c515a186a266638d`:
+all 20 top-level groups, both addressing reference subgroups and
+`raw_bounds/received` PASS with zero SKIPs against local fixtures.
 
 `PrincipalReferences` supplies the actual B identity in canonical lowercase hex
 and a genuine NIP-19 npub reference that this adapter must refuse.
@@ -43,11 +42,11 @@ The harness uses local Nostr/Blossom servers, actual relay attempt counts,
 a one-shot lost ACK, a failure before the third recipient's publish, definite
 relay refusals, cancellation before submission, relay retention loss, and a
 seal/rumor impersonation of an existing principal. No upstream source is patched.
-`ReceivedRawAtSize` remains nil because the pinned group requires exactly 1 MiB
-of returned Raw, while this adapter intentionally omits Raw and uses a 256 KiB
-wire/cache ceiling. Upstream has ruled that Raw is optional; #416's contract
-implementation and a successor pin are pending. No Raw fabrication or size-limit
-change is used to make this run pass. See `UNRESOLVED_QUESTIONS.md`.
+`ReceivedRawAtSize` publishes a real authenticated A-to-B event of exactly the
+requested serialized wire size, using signed outer padding through the ordinary
+test relay. The adapter declares `Caps().MaxRawBytes = 0` and returns nil Raw
+on every read path. The oversized event is rejected at the actual receive
+boundary; no transport result, drop count or Raw is fabricated.
 
 ### Delivery and state
 
@@ -104,8 +103,25 @@ change is used to make this run pass. See `UNRESOLVED_QUESTIONS.md`.
   History uses a typed `Cursor`; incomplete/foreign snapshots fail closed.
   History snapshots are bounded and fail closed when the
   cache/backlog cannot be covered; they are not an unbounded archive.
+- Normal WebSocket messages remain limited to `relay.MaxFrameBytes` (256 KiB).
+  Larger messages are streamed and discarded up to the inclusive
+  `relay.MaxDrainBytes` ceiling: upstream `MaxRawBytes` (1 MiB) plus the fixed
+  `DrainFramingAllowance` (64 KiB) for the NIP-01 envelope. This allowance never
+  admits an oversized event. A recognizable EVENT prefix for the active query
+  increments Dropped only after the entire oversized message is drained; its
+  body is not authenticated or cached. The reader continues to later neighbors
+  and EOSE, so one such event cannot poison repeated Sync/History scans.
+- Drain retains a fixed 256 KiB + 1 byte prefix and uses 4 KiB scratch for the
+  remainder, including fragmented WebSocket messages. It does not buffer the
+  discarded body. Malformed/unattributable messages do not fabricate event
+  counts. Above 1,114,112 total message bytes, or on an interrupted drain, the
+  connection closes: Sync reports an honest `relay_unreachable` gap and History
+  refuses with `unavailable`, without counting that incomplete frame as a drop.
+  A relay repeatedly serving above-ceiling frames can still deny availability;
+  this is an explicit resource bound. Query cancellation closes a stalled
+  connection so its partial body cannot leak into the next query.
 - Capabilities: per-conversation E2EE true, sender-side membership, threads,
-  idempotent retry, no receipts and redaction NoRedaction. The adapter implements
+  idempotent retry, no receipts, `MaxRawBytes: 0` and redaction NoRedaction. The adapter implements
   no optional extension interfaces. Canonical addressing is lowercase hex
   public keys and canonical participant/subject JSON, built with
   `ConversationFor`; display names and Matrix shortcuts are not identities.
@@ -169,7 +185,11 @@ witnesses. Existing output paths are never overwritten. Compile/setup failures
 are not detections. Tests cover valid neighbors, receipt loss, partial ACK,
 restart, foreign/incomplete cursors, backdated publication, sender mismatch,
 media secrecy, corrupt state and content bounds. The two addressing hooks have removal and valid-for-both reference plants;
-the upstream runner's fault hook that loses retry keys has its own bounded
+the Raw hook has removal, falsely small-event, nonzero-capability and Raw-exposure
+plants. Receive controls disable draining, suppress relay/batch counters, inflate
+scratch allocation and leave a cancelled drain open; each must fail its named
+assertion. A generated input measures bounded helper allocations independently
+of the local relay's fixture storage. The upstream runner's fault hook that loses retry keys has its own bounded
 subprocess control.
 Formatting is owned by the pinned upstream MediaRef type; local controls no
 longer mutate its deleted provisional implementation. The log-disclosure
