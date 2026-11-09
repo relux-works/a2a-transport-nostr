@@ -5,7 +5,7 @@ NIP-59 seals/gift wraps, NIP-65/10050 routing, NIP-42 relay authentication
 and Blossom encrypted media. The authenticated sender is the seal signer;
 it must equal the rumor pubkey. The ephemeral wrapper is never identity.
 
-## T0 adapter (provisional)
+## T0 adapter
 
 `nostrtransport.Open(SeamConfig)` creates one exclusive adapter from an
 absolute, private `StateDir` and explicit settings. It generates or reloads
@@ -19,15 +19,20 @@ Settings are JSON arrays of URLs under `read_relays`, `write_relays`,
 write relay is required; defaults and authenticated discovery use the
 existing routing implementation. No public relay is contacted by default.
 
-The new API follows the supplied T0 brief/addendum. Its **only provisional
-production import** is `nostrtransport/seam_bridge.go` importing
-`internal/seamprovisional`; package initialization registers `nostr`, with
-any registration error exposed as `RegistrationError` rather than a panic.
-The provisional runner is **not** evidence of upstream conformance. Replace
-the bridge and runner with the landed upstream `transport` and
-`transport/conformancetest`, pin its module version, delete the provisional
-package and rerun all checks before final delivery. Upstream names and
-contracts take precedence. No a2a-swarm source is changed here.
+The adapter imports `github.com/relux-works/a2a-swarm/transport` at
+`v0.0.0-20261109081233-627be6305071`, exactly upstream commit
+`627be63050714d918fcb9fcfbaa348b70e0b104b`. The pseudo-version and `go.sum`
+pin the source without a checkout-local replace. Package initialization
+registers `nostr`; `RegistrationError` exposes a registration conflict without
+panicking. The disposable provisional package has been deleted.
+
+`TestUpstreamConformance` invokes that commit's actual `conformancetest.Run`
+and all 20 groups. The harness uses local Nostr/Blossom servers, actual relay
+attempt counts, a one-shot lost ACK, a failure before the third recipient's
+publish, definite relay refusals, cancellation before submission, relay
+retention loss, and a seal/rumor impersonation of an existing principal.
+No upstream source is patched. See `UNRESOLVED_QUESTIONS.md` for upstream
+#381 coverage limits; passing these groups is not external deployment admission.
 
 ### Delivery and state
 
@@ -35,14 +40,18 @@ contracts take precedence. No a2a-swarm source is changed here.
   NIP-17 rumor, signed seals and every signed recipient/self wrap, pinned
   recipient routes and progress under the idempotency key. A transaction tag
   keeps different keys distinct even for identical text within one second.
+- Explicit `To` restricts delivery to those recipients plus self, deduplicated;
+  empty `To` addresses the whole conversation. Delivery starts with self, then
+  explicit recipients in order.
 - ACK requires an actual `OK true` for **every party including self** from
   one of its pinned routes. `OK true` with `duplicate:` counts; `OK false`
   with `duplicate:` remains UNKNOWN on this seam. The legacy API retains its
   earlier duplicate classification.
 - Retries reuse the same rumor ID and byte-identical wraps and skip ACKed
-  parties. Missing answers give UNKNOWN. Only closed `blocked:`, `invalid:`
-  or `restricted:` original replies from every route of a party can prove
-  REFUSED. Durable uncertainty before a publish is sticky: a later negative
+  parties. Only ACK includes an EventID. Partial publication or missing answers
+  give UNKNOWN without Event/Refusal. Only closed `blocked:`, `invalid:` or
+  `restricted:` original replies from every route of every part, with no ACK
+  or uncertainty, produce REFUSED and a closed upstream Refusal value. Durable uncertainty before a publish is sticky: a later negative
   reply cannot prove an earlier lost-ACK attempt was never stored.
 - State write uncertainty never yields a false ACK or triggers reconstruction
   of a lost/corrupt journal. A checksum, identity binding, signature checks
@@ -54,7 +63,8 @@ contracts take precedence. No a2a-swarm source is changed here.
 ### Sync, history and capabilities
 
 - A versioned, identity-bound opaque cursor holds a local checkpoint, relay
-  set and bounded verified wrap/rumor ID sets. A nonempty foreign, malformed
+  set and bounded verified wrap/rumor ID sets. Empty cursors require
+  `SyncOptions{Initial: true}`. A nonempty foreign, malformed
   or incomplete cursor is `invalid_cursor`, never reset to now.
 - REQ filters event **created_at** from checkpoint minus 48 hours minus
   15 minutes skew. A wrap dated 47 hours before a checkpoint but published
@@ -62,7 +72,8 @@ contracts take precedence. No a2a-swarm source is changed here.
   server receipt timestamp; claimed event time does not order delivery.
 - `relay_unreachable`, `relay_set_changed`, `window_exceeded` and
   `timeline_limited` are the only gap reasons. An empty gap conversation
-  means the whole identity inbox. A disconnected/limited relay cannot be
+  means the whole identity inbox; previously verified conversations also
+  receive a scoped gap when relay/window loss might affect them. A disconnected/limited relay cannot be
   represented as complete. A relay cannot prove that it returned every
   matching event. Events excluded by its timestamp filter are not observable;
   see `UNRESOLVED_QUESTIONS.md` for the explicit window bound.
@@ -70,18 +81,30 @@ contracts take precedence. No a2a-swarm source is changed here.
   mailbox-before-cursor persistence. The adapter never substitutes an internal
   cursor on restart and silently skips a caller's uncommitted batch.
 - History/Event use the same authenticated event cache and reverify its
-  original wrap. History snapshots are bounded and fail closed when the
+  original wrap. Rejected incoming events increment `Batch.Dropped`; History
+  exposes the count from its initial scan. `Event.Raw` is intentionally absent,
+  avoiding accidental disclosure of private envelope material. The receive
+  verifier separately bounds serialized wraps by upstream `MaxRawBytes`.
+  History uses a typed `Cursor`; incomplete/foreign snapshots fail closed.
+  History snapshots are bounded and fail closed when the
   cache/backlog cannot be covered; they are not an unbounded archive.
 - Capabilities: per-conversation E2EE true, sender-side membership, threads,
-  idempotent retry, no receipts and redaction None. The adapter implements
+  idempotent retry, no receipts and redaction NoRedaction. The adapter implements
   no optional extension interfaces. Canonical addressing is lowercase hex
   public keys and canonical participant/subject JSON, built with
   `ConversationFor`; display names and Matrix shortcuts are not identities.
-- Text budget is 4096 UTF-8 bytes with separately bounded metadata. Tests
-  exercise exact-bound ASCII, backslash and control-byte escaping through
-  both NIP-44 layers; bound+1 refuses before relay I/O. Actual serialization
-  is also checked before discovery/publish. Conversations contain at most
-  16 participants including self, with subjects up to 128 bytes.
+- The 4096-byte content budget counts the serialized inner `wireMessage` JSON
+  envelope, including escaped text and all metadata/attachments/extensions.
+  It is not a 4096-character text allowance. `MessageAtSize` measures that
+  encoding; exact-bound and bound+1 neighbors exercise it. Outer NIP-44/59
+  encryption layers are additionally checked against their protocol limits
+  before discovery/publication. Conversations contain at most 16 participants
+  including self, with subjects up to 128 bytes.
+- Operations honor cancellation and closed state with fixed `unavailable`
+  errors; cancellation after a publication yields UNKNOWN and stops pending
+  writes. Pure Caps/Addressing/Format remain usable after Close. Sync requests
+  available events immediately (no long polling); EOSE/network waits have
+  per-relay timeouts bounded by the call context.
 
 ### Media
 
@@ -100,7 +123,6 @@ server text and received references are mapped to fixed closed errors.
 ## Layout and compatibility
 
 - `nostrtransport/adapter*.go`, `seam_bridge.go`: the new T0-facing adapter.
-- `internal/seamprovisional/`: disposable contract and group runner only.
 - `nostr/`: reviewed BIP-340/NIP-01/44/59/17 and encrypted-file primitives.
 - `relay/`, `blossom/`: bounded wire clients; relay queries now return detached
   bounded results and distinguish original OK frames from local disconnects.
@@ -119,6 +141,7 @@ Run from the module root with the pinned toolchain in CI:
 go mod verify
 go vet ./...
 go test -race -count=1 ./...
+go test -count=1 ./nostrtransport -run '^TestUpstreamConformance$' -v
 go build -trimpath ./...
 go run .scripts/check-guards.go -out .temp/controls-01
 ```
@@ -129,8 +152,11 @@ includes logs and `results.json` with source hashes, exits and expected failure
 witnesses. Existing output paths are never overwritten. Compile/setup failures
 are not detections. Tests cover valid neighbors, receipt loss, partial ACK,
 restart, foreign/incomplete cursors, backdated publication, sender mismatch,
-media secrecy, corrupt state and content bounds. The provisional runner's
+media secrecy, corrupt state and content bounds. The upstream runner's
 fault hook that loses retry keys has its own bounded subprocess control.
+Formatting is owned by the pinned upstream MediaRef type; local controls no
+longer mutate its deleted provisional implementation. The log-disclosure
+control still plants a real adapter log call. Guard logs belong under `.temp/`.
 
 ## License
 

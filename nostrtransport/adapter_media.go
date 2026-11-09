@@ -41,14 +41,14 @@ func decodeMedia(raw []byte) (privateMedia, error) {
 func (a *Adapter) Upload(ctx context.Context, r io.Reader, meta MediaMeta) (MediaRef, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed {
+	if a.closed || ctx.Err() != nil {
 		return MediaRef{}, seamError("unavailable")
 	}
 	if r == nil || meta.Size < 0 || meta.Size > maxMedia || len(meta.ContentType) > 128 {
 		return MediaRef{}, seamError("invalid_reference")
 	}
 	data, e := io.ReadAll(io.LimitReader(r, maxMedia+1))
-	if e != nil {
+	if e != nil || ctx.Err() != nil {
 		return MediaRef{}, seamError("unavailable")
 	}
 	if len(data) > maxMedia {
@@ -69,17 +69,17 @@ func (a *Adapter) Upload(ctx context.Context, r io.Reader, meta MediaMeta) (Medi
 		// Never accept a server's redirecting URL as part of a private reference.
 		m := privateMedia{Version: 1, URL: strings.TrimSuffix(server, "/") + "/" + hash, MIME: meta.ContentType, CipherSHA: fc.CipherSHA, PlainSHA: fc.PlainSHA, Key: hex.EncodeToString(fc.Key), Nonce: hex.EncodeToString(fc.Nonce), Size: int64(len(data))}
 		raw, _ := json.Marshal(m)
-		return mediaRef(raw), nil
+		return mediaRef(string(raw)), nil
 	}
 	return MediaRef{}, seamError("unavailable")
 }
 func (a *Adapter) Download(ctx context.Context, ref MediaRef, w io.Writer, limit int64) (MediaMeta, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed {
+	if a.closed || ctx.Err() != nil {
 		return MediaMeta{}, seamError("unavailable")
 	}
-	m, e := decodeMedia(ref.Bytes())
+	m, e := decodeMedia([]byte(ref.Opaque()))
 	if e != nil {
 		return MediaMeta{}, e
 	}
@@ -103,6 +103,9 @@ func (a *Adapter) Download(ctx context.Context, ref MediaRef, w io.Writer, limit
 	plain, e := nostr.DecryptFile(ct, key, nonce, m.CipherSHA, m.PlainSHA)
 	if e != nil || int64(len(plain)) != m.Size {
 		return MediaMeta{}, seamError("invalid_reference")
+	}
+	if ctx.Err() != nil {
+		return MediaMeta{}, seamError("unavailable")
 	}
 	n, e := w.Write(plain)
 	if e != nil || n != len(plain) {

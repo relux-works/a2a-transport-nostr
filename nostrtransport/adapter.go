@@ -18,12 +18,13 @@ import (
 	"unicode/utf8"
 
 	"relux.works/a2a-transport-nostr/nostr"
+	"relux.works/a2a-transport-nostr/relay"
 )
 
 const (
 	// Two nested NIP44 encryptions: the signed seal JSON must also fit 65535.
-	// Worst-case JSON escaping uses six bytes per content byte. Reserve envelope
-	// and bounded metadata at both layers; check the actual serialized layers too.
+	// Bound the serialized inner JSON envelope, including escaped text/metadata.
+	// Check the actual outer cryptographic layers against their protocol limits too.
 	seamMaxContent = 4096
 	maxParties     = 16
 	maxMedia       = 8 << 20
@@ -40,6 +41,9 @@ type Adapter struct {
 	closed  bool
 	dropped uint64
 	now     func() time.Time
+	// Publication boundary; production always uses the real relay client.
+	publishEvent func(context.Context, string, *nostr.Event) (relay.OKResult, error)
+	batchLimit   int
 }
 
 var _ SeamTransport = (*Adapter)(nil)
@@ -135,7 +139,10 @@ func Open(cfg SeamConfig) (*Adapter, error) {
 	if err != nil {
 		return fail(seamError("unavailable"))
 	}
-	a := &Adapter{core: core, dir: cfg.StateDir, lock: lock, now: time.Now}
+	a := &Adapter{core: core, dir: cfg.StateDir, lock: lock, now: time.Now, batchLimit: 1024}
+	a.publishEvent = func(ctx context.Context, url string, ev *nostr.Event) (relay.OKResult, error) {
+		return a.core.clientFor(url).Publish(ctx, ev)
+	}
 	// Bind persistent records to this identity; replacement keys cannot replay
 	// another sender's journal or silently take over its inbox.
 	binding := []byte(key.PubKeyHex())
@@ -200,10 +207,10 @@ func settingURLs(raw string, ws bool) ([]string, error) {
 	}
 	return nostr.SortedUnique(out), nil
 }
-func (a *Adapter) Self(context.Context) (Principal, error) {
+func (a *Adapter) Self(ctx context.Context) (Principal, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed {
+	if a.closed || ctx.Err() != nil {
 		return Principal{}, seamError("unavailable")
 	}
 	return Principal{ID: PrincipalID(a.core.Identity())}, nil
@@ -211,7 +218,12 @@ func (a *Adapter) Self(context.Context) (Principal, error) {
 func (a *Adapter) Caps() Capabilities {
 	return Capabilities{Redaction: redactionNone, Membership: membershipSenderSide, Threads: true, IdempotentRetry: true, MaxContentBytes: seamMaxContent}
 }
-func (a *Adapter) ConversationCaps(_ context.Context, c ConversationID) (ConversationCaps, error) {
+func (a *Adapter) ConversationCaps(ctx context.Context, c ConversationID) (ConversationCaps, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || ctx.Err() != nil {
+		return ConversationCaps{}, seamError("unavailable")
+	}
 	if _, e := a.conversation(c); e != nil {
 		return ConversationCaps{}, e
 	}
@@ -219,18 +231,31 @@ func (a *Adapter) ConversationCaps(_ context.Context, c ConversationID) (Convers
 }
 func (a *Adapter) Addressing() Addressing { return a }
 func (a *Adapter) Principal(ref string) (PrincipalID, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return "", seamError("unavailable")
+	}
+	return parsePrincipal(ref)
+}
+func parsePrincipal(ref string) (PrincipalID, error) {
 	if len(ref) != 64 || strings.ToLower(ref) != ref || nostr.ParseXOnlyPubKey(ref) != nil {
 		return "", seamError("invalid_reference")
 	}
 	return PrincipalID(ref), nil
 }
 func (a *Adapter) Format(p PrincipalID) string {
-	if _, err := a.Principal(string(p)); err != nil {
+	if _, err := parsePrincipal(string(p)); err != nil {
 		return "nostr:invalid"
 	}
 	return string(p)
 }
-func (a *Adapter) Conversation(_ context.Context, ref string) (ConversationID, error) {
+func (a *Adapter) Conversation(ctx context.Context, ref string) (ConversationID, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || ctx.Err() != nil {
+		return "", seamError("unavailable")
+	}
 	c := ConversationID(ref)
 	_, e := a.conversation(c)
 	return c, e
@@ -238,6 +263,11 @@ func (a *Adapter) Conversation(_ context.Context, ref string) (ConversationID, e
 
 // ConversationFor returns the canonical participant-set ID, including self.
 func (a *Adapter) ConversationFor(parties []PrincipalID, subject string) (ConversationID, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return "", seamError("unavailable")
+	}
 	p := []string{a.core.Identity()}
 	for _, v := range parties {
 		p = append(p, string(v))
@@ -254,7 +284,7 @@ func (a *Adapter) conversation(c ConversationID) (convJSON, error) {
 	}
 	self := false
 	for _, p := range v.P {
-		if _, err := a.Principal(p); err != nil {
+		if _, err := parsePrincipal(p); err != nil {
 			return v, err
 		}
 		self = self || p == a.core.Identity()
@@ -277,14 +307,19 @@ func strictJSON(raw []byte, v any) error {
 	return nil
 }
 func digest(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
-func (a *Adapter) Members(_ context.Context, c ConversationID) ([]Member, error) {
+func (a *Adapter) Members(ctx context.Context, c ConversationID) ([]Member, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || ctx.Err() != nil {
+		return nil, seamError("unavailable")
+	}
 	v, e := a.conversation(c)
 	if e != nil {
 		return nil, e
 	}
 	out := make([]Member, len(v.P))
 	for i, p := range v.P {
-		out[i] = Member{ID: PrincipalID(p)}
+		out[i] = Member{Principal: PrincipalID(p), Membership: "joined"}
 	}
 	return out, nil
 }

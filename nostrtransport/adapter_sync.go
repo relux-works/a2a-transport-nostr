@@ -70,20 +70,20 @@ func (a *Adapter) Sync(ctx context.Context, from Cursor, opt SyncOptions) (Batch
 	return a.syncLocked(ctx, from, opt)
 }
 func (a *Adapter) syncLocked(ctx context.Context, from Cursor, opt SyncOptions) (Batch, error) {
-	if a.closed {
+	if a.closed || ctx.Err() != nil {
 		return Batch{}, seamError("unavailable")
 	}
 	c, e := a.readCursor(from)
 	if e != nil {
 		return Batch{}, e
 	}
-	limit := opt.Limit
-	if limit == 0 {
-		limit = 256
+	if len(from) == 0 && !opt.Initial {
+		return Batch{}, seamError("invalid_cursor")
 	}
-	if limit < 1 || limit > 1024 {
+	if opt.Timeout < 0 {
 		return Batch{}, seamError("invalid_reference")
 	}
+	limit := a.batchLimit
 	out := Batch{}
 	reasons := map[string]bool{}
 	urls := union(a.core.cfg.ReadRelays, a.core.cfg.DMRelays)
@@ -127,6 +127,7 @@ func (a *Adapter) syncLocked(ctx context.Context, from Cursor, opt SyncOptions) 
 			s, err := a.verifyWrap(wrap)
 			if err != nil {
 				a.dropped++
+				out.Dropped++
 				continue
 			}
 			if wrap.CreatedAt < since {
@@ -152,6 +153,9 @@ func (a *Adapter) syncLocked(ctx context.Context, from Cursor, opt SyncOptions) 
 			out.Events = append(out.Events, s.event())
 		}
 	}
+	if ctx.Err() != nil {
+		return Batch{}, seamError("unavailable")
+	}
 	if allOK {
 		c.Checkpoint = now
 	}
@@ -164,9 +168,32 @@ func (a *Adapter) syncLocked(ctx context.Context, from Cursor, opt SyncOptions) 
 			}
 		}
 	}
-	// A gap without a known conversation is identity-wide (empty opaque ID).
+	// Relay/window loss is identity-wide; also identify previously verified
+	// conversations so a conversation consumer can observe its possible loss.
+	known := map[string]bool{}
+	if len(reasons) > 0 {
+		entries, err := os.ReadDir(filepath.Join(a.dir, "seam-events"))
+		if err != nil || len(entries) > seamSeenLimit {
+			return Batch{}, seamError("unavailable")
+		}
+		for _, entry := range entries {
+			n := entry.Name()
+			if len(n) != 69 || n[64:] != ".json" {
+				return Batch{}, seamError("unavailable")
+			}
+			saved, err := a.loadEvent(EventID(n[:64]))
+			if err != nil {
+				return Batch{}, err
+			}
+			known[string(saved.Conversation)] = true
+		}
+	}
+	// Empty conversation additionally covers conversations not yet observed.
 	for _, reason := range sortedKeys(reasons) {
-		out.Gaps = append(out.Gaps, Gap{Reason: reason})
+		out.Gaps = append(out.Gaps, Gap{Reason: GapReason(reason)})
+		for _, conv := range sortedKeys(known) {
+			out.Gaps = append(out.Gaps, Gap{Conversation: ConversationID(conv), Reason: GapReason(reason)})
+		}
 	}
 	raw, _ := json.Marshal(c)
 	out.Next = Cursor(raw)
@@ -176,6 +203,10 @@ func (a *Adapter) syncLocked(ctx context.Context, from Cursor, opt SyncOptions) 
 }
 func (a *Adapter) verifyWrap(wrap *nostr.Event) (savedEvent, error) {
 	var s savedEvent
+	raw, err := json.Marshal(wrap)
+	if err != nil || len(raw) > maxRawBytes {
+		return s, seamError("content_too_large")
+	}
 	if wrap == nil || wrap.CreatedAt < 0 || wrap.CreatedAt > a.now().Unix()+futureSkewSeconds {
 		return s, seamError("unauthenticated")
 	}
@@ -259,7 +290,7 @@ func (a *Adapter) loadEvent(id EventID) (savedEvent, error) {
 func (a *Adapter) Event(ctx context.Context, c ConversationID, id EventID) (Event, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed {
+	if a.closed || ctx.Err() != nil {
 		return Event{}, seamError("unavailable")
 	}
 	if _, e := a.conversation(c); e != nil {
@@ -270,7 +301,7 @@ func (a *Adapter) Event(ctx context.Context, c ConversationID, id EventID) (Even
 	}
 	s, e := a.loadEvent(id)
 	if e != nil {
-		if _, err := a.syncLocked(ctx, nil, SyncOptions{Limit: 1024}); err != nil {
+		if _, err := a.syncLocked(ctx, nil, SyncOptions{Initial: true}); err != nil {
 			return Event{}, err
 		}
 		s, e = a.loadEvent(id)
@@ -289,28 +320,37 @@ type historyCursor struct {
 	Offset       int
 }
 
-func (a *Adapter) History(ctx context.Context, c ConversationID, page []byte, limit int) (Page, error) {
+func (a *Adapter) History(ctx context.Context, c ConversationID, page Cursor, limit int) (Page, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed {
+	if a.closed || ctx.Err() != nil {
 		return Page{}, seamError("unavailable")
 	}
 	if _, e := a.conversation(c); e != nil {
 		return Page{}, e
 	}
-	if limit < 1 || limit > 1024 {
+	if limit < 1 {
 		return Page{}, seamError("invalid_reference")
 	}
+	limit = min(limit, 1024)
+	dropped := 0
 	h := historyCursor{Version: 1, Identity: a.core.Identity(), Conversation: c}
 	if len(page) > 0 {
-		if len(page) > 1<<20 || strictJSON(page, &h) != nil || h.Version != 1 || h.Identity != a.core.Identity() || h.Conversation != c || h.Offset < 0 || h.Offset > len(h.IDs) || len(h.IDs) > seamSeenLimit {
+		h = historyCursor{}
+		if len(page) > 1<<20 || strictJSON(page, &h) != nil || h.Version != 1 || h.Identity != a.core.Identity() || h.Conversation != c || h.Offset < 1 || h.Offset >= len(h.IDs) || h.IDs == nil || len(h.IDs) > seamSeenLimit {
 			return Page{}, seamError("invalid_cursor")
 		}
+		for i, id := range h.IDs {
+			if !hexID(string(id)) || (i > 0 && h.IDs[i-1] >= id) {
+				return Page{}, seamError("invalid_cursor")
+			}
+		}
 	} else {
-		batch, e := a.syncLocked(ctx, nil, SyncOptions{Limit: 1024})
+		batch, e := a.syncLocked(ctx, nil, SyncOptions{Initial: true})
 		if e != nil {
 			return Page{}, e
 		}
+		dropped = batch.Dropped
 		if len(batch.Gaps) > 0 {
 			return Page{}, seamError("unavailable")
 		}
@@ -333,7 +373,7 @@ func (a *Adapter) History(ctx context.Context, c ConversationID, page []byte, li
 		}
 		sort.Slice(h.IDs, func(i, j int) bool { return h.IDs[i] < h.IDs[j] })
 	}
-	out := Page{}
+	out := Page{Dropped: dropped}
 	for h.Offset < len(h.IDs) && len(out.Events) < limit {
 		s, e := a.loadEvent(h.IDs[h.Offset])
 		if e != nil || s.Conversation != c {

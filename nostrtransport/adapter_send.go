@@ -37,7 +37,7 @@ func toWire(m Message) (wireMessage, error) {
 		}
 	}
 	for _, ref := range m.Attachments {
-		raw := ref.Bytes()
+		raw := []byte(ref.Opaque())
 		if _, e := decodeMedia(raw); e != nil {
 			return w, e
 		}
@@ -52,12 +52,16 @@ func toWire(m Message) (wireMessage, error) {
 			return w, seamError("invalid_reference")
 		}
 	}
+	raw, err := json.Marshal(w)
+	if err != nil || len(raw) > seamMaxContent {
+		return w, seamError("content_too_large")
+	}
 	return w, nil
 }
 func fromWire(w wireMessage) Message {
 	m := Message{Kind: w.Kind, Text: w.Text, To: w.To, Re: w.Re, Thread: w.Thread, Extensions: w.Extensions}
 	for _, r := range w.Media {
-		m.Attachments = append(m.Attachments, mediaRef(r))
+		m.Attachments = append(m.Attachments, mediaRef(string(r)))
 	}
 	return m
 }
@@ -96,7 +100,7 @@ type seamSend struct {
 func (a *Adapter) Send(ctx context.Context, req SendRequest) (SendResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed {
+	if a.closed || ctx.Err() != nil {
 		return SendResult{}, seamError("unavailable")
 	}
 	c, e := a.conversation(req.Conversation)
@@ -119,6 +123,7 @@ func (a *Adapter) Send(ctx context.Context, req SendRequest) (SendResult, error)
 		Conversation ConversationID
 		Message      wireMessage
 	}{req.Conversation, w})
+	targets := deliveryTargets(c.P, w.To, a.core.Identity())
 	hash := digest(canonical)
 	name := sendFileName(req.IdempotencyKey)
 	raw, err := readPrivate(filepath.Join(a.dir, "seam-send", name), 4<<20)
@@ -152,7 +157,7 @@ func (a *Adapter) Send(ctx context.Context, req SendRequest) (SendResult, error)
 		rumor.ID = rumor.ComputeID()
 		rec = seamSend{Version: 1, Identity: a.core.Identity(), Hash: hash, Conversation: req.Conversation, Rumor: rumor, Parts: map[string]*seamPart{}}
 		// Build/size-check every cryptographic layer before any discovery or publish.
-		for _, p := range c.P {
+		for _, p := range targets {
 			seal, e := nostr.SealRumor(a.core.cfg.Key, rumor, p, a.now().Unix())
 			if e != nil {
 				return SendResult{}, seamError("content_too_large")
@@ -163,7 +168,7 @@ func (a *Adapter) Send(ctx context.Context, req SendRequest) (SendResult, error)
 			}
 			rec.Parts[p] = &seamPart{Seal: seal, Wrap: wrap, Refused: map[string]bool{}, Uncertain: map[string]bool{}}
 		}
-		for _, p := range c.P {
+		for _, p := range targets {
 			routeBytes, _ := json.Marshal(a.core.resolve(ctx, p))
 			routes, e := settingURLs(string(routeBytes), true)
 			if e != nil || len(routes) == 0 {
@@ -175,7 +180,7 @@ func (a *Adapter) Send(ctx context.Context, req SendRequest) (SendResult, error)
 			return SendResult{}, seamError("unavailable")
 		}
 	}
-	return a.publish(ctx, name, &rec), nil
+	return a.publish(ctx, name, &rec, targets), nil
 }
 func (a *Adapter) saveRecord(name string, r *seamSend) error {
 	r.Checksum = ""
@@ -201,11 +206,13 @@ func (a *Adapter) checkRecord(r *seamSend) error {
 	if e != nil {
 		return e
 	}
-	if r.Version != 1 || r.Identity != a.core.Identity() || !hexID(r.Hash) || r.Rumor == nil || r.Rumor.PubKey != r.Identity || !r.Rumor.CheckID() || r.Rumor.Sig != "" || len(c.P) != len(r.Parts) {
+	if r.Version != 1 || r.Identity != a.core.Identity() || !hexID(r.Hash) || r.Rumor == nil || r.Rumor.PubKey != r.Identity || !r.Rumor.CheckID() || r.Rumor.Sig != "" {
 		return seamError("unavailable")
 	}
-	for _, p := range c.P {
-		v := r.Parts[p]
+	for p, v := range r.Parts {
+		if !contains(c.P, p) {
+			return seamError("unavailable")
+		}
 		if v == nil || v.Wrap == nil || v.Seal == nil || len(v.Relays) == 0 || v.Refused == nil || v.Uncertain == nil {
 			return seamError("unavailable")
 		}
@@ -217,13 +224,23 @@ func (a *Adapter) checkRecord(r *seamSend) error {
 			return seamError("unavailable")
 		}
 	}
+	if r.Parts[r.Identity] == nil {
+		return seamError("unavailable")
+	}
 	self, err := a.verifyWrap(r.Parts[r.Identity].Wrap)
 	if err != nil || self.ID != EventID(r.Rumor.ID) || self.Conversation != r.Conversation {
 		return seamError("unavailable")
 	}
 	rumorRaw, _ := json.Marshal(r.Rumor)
-	for _, p := range c.P {
+	targets := deliveryTargets(c.P, self.Message.To, r.Identity)
+	if len(targets) != len(r.Parts) {
+		return seamError("unavailable")
+	}
+	for _, p := range targets {
 		part := r.Parts[p]
+		if part == nil {
+			return seamError("unavailable")
+		}
 		ck, err := nostr.ConversationKey(a.core.cfg.Key, p)
 		if err != nil {
 			return seamError("unavailable")
@@ -235,16 +252,20 @@ func (a *Adapter) checkRecord(r *seamSend) error {
 	}
 	return nil
 }
-func (a *Adapter) publish(ctx context.Context, name string, rec *seamSend) SendResult {
-	result := SendResult{Outcome: UNKNOWN, Event: EventID(rec.Rumor.ID)}
+func (a *Adapter) publish(ctx context.Context, name string, rec *seamSend, targets []string) SendResult {
+	result := SendResult{Outcome: UNKNOWN}
 	all := true
-	definite := false
-	for _, p := range sortedKeys(rec.Parts) {
+	definite := true
+	for _, p := range targets {
 		part := rec.Parts[p]
 		if part.Ack {
+			definite = false
 			continue
 		}
 		for _, u := range part.Relays {
+			if ctx.Err() != nil {
+				return result
+			}
 			if part.Refused[u] {
 				continue
 			}
@@ -256,7 +277,7 @@ func (a *Adapter) publish(ctx context.Context, name string, rec *seamSend) SendR
 				return result
 			}
 			call, cancel := context.WithTimeout(ctx, 3*time.Second)
-			ok, e := a.core.clientFor(u).Publish(call, part.Wrap)
+			ok, e := a.publishEvent(call, u, part.Wrap)
 			cancel()
 			if e == nil && ok.Original && ok.Accepted {
 				part.Ack = true
@@ -272,20 +293,24 @@ func (a *Adapter) publish(ctx context.Context, name string, rec *seamSend) SendR
 				break
 			}
 		}
+		if part.Ack {
+			definite = false
+		}
 		if !part.Ack {
 			all = false
 			refused := len(part.Relays) > 0
 			for _, u := range part.Relays {
 				refused = refused && part.Refused[u] && !part.Uncertain[u]
 			}
-			definite = definite || refused
+			definite = definite && refused
 		}
 	}
 	if all {
 		result.Outcome = ACK
+		result.Event = EventID(rec.Rumor.ID)
 	} else if definite {
 		result.Outcome = REFUSED
-		result.Refusal = "recipient_unreachable"
+		result.Refusal = newRefusal("refused")
 	}
 	return result
 }
@@ -304,4 +329,23 @@ func contains(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// Preserve explicit-recipient order, always include self, and never send duplicates.
+func deliveryTargets(audience []string, to []PrincipalID, self string) []string {
+	out := []string{self}
+	if len(to) == 0 {
+		for _, p := range audience {
+			if !contains(out, p) {
+				out = append(out, p)
+			}
+		}
+	} else {
+		for _, p := range to {
+			if !contains(out, string(p)) {
+				out = append(out, string(p))
+			}
+		}
+	}
+	return out
 }

@@ -1,7 +1,7 @@
 package nostrtransport
 
-// This is the adapter's sole provisional seam import. Replace it with landed T0.
-import seam "relux.works/a2a-transport-nostr/internal/seamprovisional"
+// Public T0 contract pinned to the landed upstream commit in go.mod.
+import seam "github.com/relux-works/a2a-swarm/transport"
 
 type SeamConfig = seam.Config
 type SeamTransport = seam.Transport
@@ -16,6 +16,7 @@ type SendResult = seam.SendResult
 type Event = seam.Event
 type Batch = seam.Batch
 type Gap = seam.Gap
+type GapReason = seam.GapReason
 type SyncOptions = seam.SyncOptions
 type Page = seam.Page
 type Member = seam.Member
@@ -26,14 +27,16 @@ type ConversationCaps = seam.ConversationCaps
 type Addressing = seam.Addressing
 
 const (
+	maxRawBytes          = seam.MaxRawBytes
 	ACK                  = seam.ACK
 	UNKNOWN              = seam.UNKNOWN
 	REFUSED              = seam.REFUSED
-	redactionNone        = seam.None
+	redactionNone        = seam.NoRedaction
 	membershipSenderSide = seam.SenderSide
 )
 
 var seamError = seam.NewError
+var newRefusal = seam.NewRefusal
 var mediaRef = seam.NewMediaRef
 
 // Registration errors stay observable, never panic during application init.

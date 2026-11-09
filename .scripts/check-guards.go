@@ -36,15 +36,17 @@ func main() {
 	}
 	must(os.MkdirAll(dest, 0700))
 	plants := []plant{
-		{"drop-key", "nostrtransport/adapter_send.go", "name := sendFileName(req.IdempotencyKey)", "name := sendFileName(req.IdempotencyKey + time.Now().String())", "TestProvisionalConformance/idempotent_retry", "idempotency key retry changed logical event"},
+		{"drop-key", "nostrtransport/adapter_send.go", "name := sendFileName(req.IdempotencyKey)", "req.IdempotencyKey += time.Now().String(); name := sendFileName(req.IdempotencyKey)", "TestUpstreamConformance/send_idempotency", "idempotency key retry created a second logical event"},
 		{"wrap-sender", "nostrtransport/adapter_sync.go", "Sender: PrincipalID(dm.SenderHex)", "Sender: PrincipalID(dm.WrapperHex)", "TestSeamSenderIsSeal", "sender is not authenticated seal signer"},
-		{"foreign-reset", "nostrtransport/adapter_sync.go", "c.Identity != a.core.Identity()", "false", "TestProvisionalConformance/foreign_cursor", "foreign cursor reset or used on wire"},
+		{"foreign-reset", "nostrtransport/adapter_sync.go", "c.Identity != a.core.Identity()", "false", "TestUpstreamConformance/cursors", "foreign or invalid cursor accepted"},
 		{"partial-ack", "nostrtransport/adapter_send.go", "if all {", "if all || !all {", "TestSeamPartialRestart", "partial delivery falsely ACKed"},
-		{"media-log-leak", "nostrtransport/adapter_media.go", "decodeMedia(ref.Bytes())", "decodeMedia(leakMedia(ref.Bytes()))", "TestProvisionalConformance/media_privacy", "MediaRef marker exposed"},
-		{"media-format-leak", "internal/seamprovisional/transport.go", "io.WriteString(s, r.String())", "io.WriteString(s, r.data)", "TestSeamMediaMarker", "MediaRef marker exposed"},
-		{"rumor-seal-mismatch", "nostr/nip59.go", "if rumor.PubKey != seal.PubKey {", "if false && rumor.PubKey != seal.PubKey {", "TestProvisionalConformance/unverifiable_sender", "unverifiable sender delivered or not counted"},
-		{"oversize", "nostrtransport/adapter_send.go", "len(m.Text) > seamMaxContent", "len(m.Text) > seamMaxContent+1", "TestProvisionalConformance/content_bound", "oversize reached wire or wrong rejection"},
-		{"backdate-window", "nostrtransport/adapter_sync.go", "c.Checkpoint-syncWindow", "c.Checkpoint-60", "TestProvisionalConformance/backdated_publish", "backdated event lost after checkpoint"},
+		{"media-log-leak", "nostrtransport/adapter_media.go", "decodeMedia([]byte(ref.Opaque()))", "decodeMedia(leakMedia([]byte(ref.Opaque())))", "TestUpstreamConformance/media_redaction_errors", "received marker in log"},
+		{"rumor-seal-mismatch", "nostr/nip59.go", "if rumor.PubKey != seal.PubKey {", "if false && rumor.PubKey != seal.PubKey {", "TestUpstreamConformance/unverifiable_sender", "unverifiable sender delivered"},
+		{"oversize", "nostrtransport/adapter_send.go", "len(raw) > seamMaxContent", "len(raw) > seamMaxContent+1", "TestUpstreamConformance/bounds", "oversize content must be refused with zero wire calls"},
+		{"backdate-window", "nostrtransport/adapter_sync.go", "c.Checkpoint-syncWindow", "c.Checkpoint-60", "TestUpstreamConformance/resume_backdated_history", "want exactly one"},
+		{"history-missing-fields", "nostrtransport/adapter_sync.go", "h.Version != 1 || h.Identity != a.core.Identity() || h.Conversation != c || h.Offset < 1 || h.Offset >= len(h.IDs) || h.IDs == nil", "false", "TestSeamHistoryMissingFields", "incomplete history cursor accepted or used on wire"},
+		{"explicit-recipient", "nostrtransport/adapter_send.go", "if len(to) == 0 {", "if true {", "TestSeamExplicitRecipients", "explicit To delivered to excluded party or lost self"},
+		{"raw-bound", "nostrtransport/adapter_sync.go", "len(raw) > maxRawBytes", "false && len(raw) > maxRawBytes", "TestSeamRawLimitPositiveNeighbor", "oversized received wrap not refused at raw bound"},
 		{"cursor-missing-fields", "nostrtransport/adapter_sync.go", "c = seamCursor{}", "// planted: retain initial defaults", "TestSeamCursorGapsAndBounds", "invalid cursor reset or reached wire"},
 	}
 	var results []result
@@ -52,7 +54,7 @@ func main() {
 	for _, p := range plants {
 		dir := filepath.Join(dest, p.Name)
 		must(os.Mkdir(dir, 0700))
-		for _, name := range []string{"nostrtransport", "nostr", "relay", "blossom", "transport", "testrelay", "testblossom", "internal", "go.mod", "go.sum"} {
+		for _, name := range []string{"nostrtransport", "nostr", "relay", "blossom", "transport", "testrelay", "testblossom", "go.mod", "go.sum"} {
 			must(copyTree(filepath.Join(root, name), filepath.Join(dir, name)))
 		}
 		if p.Name == "media-log-leak" {

@@ -365,3 +365,11 @@ func matchAny(filters []*Filter, ev *nostr.Event) bool {
 	}
 	return false
 }
+
+// DiscardEvents simulates a local relay retention boundary; counters are retained.
+func (r *Relay) DiscardEvents() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = nil
+	r.seen = map[string]bool{}
+}

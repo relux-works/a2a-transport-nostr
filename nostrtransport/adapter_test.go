@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	seam "relux.works/a2a-transport-nostr/internal/seamprovisional"
-	"relux.works/a2a-transport-nostr/internal/seamprovisional/conformancetest"
+	seam "github.com/relux-works/a2a-swarm/transport"
+	"github.com/relux-works/a2a-swarm/transport/conformancetest"
 	"relux.works/a2a-transport-nostr/nostr"
 	"relux.works/a2a-transport-nostr/relay"
 	"relux.works/a2a-transport-nostr/testblossom"
@@ -35,6 +35,9 @@ func newSeamWorld(t *testing.T) *seamWorld {
 	t.Helper()
 	root, e := filepath.EvalSymlinks(t.TempDir())
 	if e != nil {
+		t.Fatal(e)
+	}
+	if e := os.Chmod(root, 0700); e != nil {
 		t.Fatal(e)
 	}
 	r, e := testrelay.StartWithOptions(testrelay.Options{TrueDuplicate: true})
@@ -100,21 +103,17 @@ func (w *seamWorld) restartB(t *testing.T) *Adapter {
 	t.Cleanup(func() { a.Close() })
 	return a
 }
-func (w *seamWorld) inject(t *testing.T, kind string) EventID {
+func (w *seamWorld) inject(t *testing.T, claim PrincipalID, text string, when time.Time) EventID {
 	t.Helper()
 	c, _ := w.a.conversation(w.conv)
-	body, _ := json.Marshal(wireMessage{Version: 1, Text: "injected"})
-	at := time.Now().Unix()
+	body, _ := json.Marshal(wireMessage{Version: 1, Text: text})
+	at := when.Unix()
 	rumor, e := nostr.BuildRumor(w.a.core.cfg.Key, c.P, nostr.KindRumor, string(body), nostr.RumorOptions{}, at)
 	if e != nil {
 		t.Fatal(e)
 	}
-	if kind == "unverifiable-sender" {
-		rumor.PubKey = w.c.core.Identity()
-		rumor.ID = rumor.ComputeID()
-	}
-	if kind == "backdated-publish" {
-		rumor.CreatedAt = at - 47*3600
+	if claim != "" {
+		rumor.PubKey = string(claim)
 		rumor.ID = rumor.ComputeID()
 	}
 	seal, e := nostr.SealRumor(w.a.core.cfg.Key, rumor, w.b.core.Identity(), at)
@@ -125,9 +124,9 @@ func (w *seamWorld) inject(t *testing.T, kind string) EventID {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if kind == "backdated-publish" {
+	{
 		key, _ := nostr.GeneratePrivKey()
-		wrap.CreatedAt = at - 47*3600
+		wrap.CreatedAt = at
 		// The wrap encryption key must match its new signer: recreate encrypted seal.
 		ck, _ := nostr.ConversationKey(key, w.b.core.Identity())
 		raw, _ := json.Marshal(seal)
@@ -147,50 +146,100 @@ func (w *seamWorld) inject(t *testing.T, kind string) EventID {
 	return EventID(rumor.ID)
 }
 
-// These groups exercise the real adapter through local relay/Blossom servers;
-// the provisional runner is not represented as the eventual upstream suite.
-func TestProvisionalConformance(t *testing.T) {
-	conformancetest.Run(t, conformancetest.Harness{New: func(t *testing.T) *conformancetest.World {
-		w := newSeamWorld(t)
-		var cw *conformancetest.World
-		var logs bytes.Buffer
-		oldLog := log.Writer()
-		log.SetOutput(&logs)
-		t.Cleanup(func() { log.SetOutput(oldLog) })
-		cw = &conformancetest.World{A: w.a, B: w.b, Conversation: w.conv, Advance: func(d time.Duration) { at := w.a.now().Add(d); w.a.now = func() time.Time { return at } }, Fault: func(name string) func() {
-			switch name {
-			case "fail-after-submit":
-				w.r.SetRecipientMode(w.b.core.Identity(), "after-submit")
-				return func() { w.r.SetRecipientMode(w.b.core.Identity(), "") }
-			case "partial-ack":
-				w.r.SetRecipientMode(w.c.core.Identity(), "silent")
-				return func() { w.r.SetRecipientMode(w.c.core.Identity(), "") }
-			case "drop-key-on-retry":
-				original := cw.A
-				cw.A = &droppedKeyTransport{SeamTransport: original}
-				return func() { cw.A = original }
-			case "oversize":
-				original := cw.Oversize
-				cw.Oversize = Message{Text: strings.Repeat("x", w.a.Caps().MaxContentBytes+1)}
-				return func() { cw.Oversize = original }
-			case "foreign-cursor":
-				original := cw.Foreign
-				b, e := w.b.Sync(context.Background(), nil, SyncOptions{})
-				if e != nil {
-					t.Fatal(e)
-				}
-				cw.Foreign = b.Next
-				return func() { cw.Foreign = original }
-			default:
-				t.Fatalf("harness missing fault hook %s", name)
-				return nil
+// Upstream contract groups run against the adapter and real local relay/Blossom
+// I/O. Faults change the I/O boundary, never manufacture transport results.
+func TestUpstreamConformance(t *testing.T) {
+	conformancetest.Run(t, conformancetest.Harness{New: func(t *testing.T) *conformancetest.Fixture { return upstreamFixture(t) }})
+}
+func upstreamFixture(t *testing.T) *conformancetest.Fixture {
+	w := newSeamWorld(t)
+	var logs bytes.Buffer
+	oldLog := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(oldLog) })
+	f := &conformancetest.Fixture{A: w.a, B: w.b, C: w.c, Conversation: w.conv,
+		Extensions: map[string]json.RawMessage{"opaque.test": json.RawMessage(`"valid extension"`)},
+		StateDir:   w.root, SentinelDir: w.sentinel,
+		RestartB: func() SeamTransport { return w.restartB(t) },
+		PartWireCalls: func(key string) map[PrincipalID]int {
+			raw, e := readPrivate(filepath.Join(w.a.dir, "seam-send", sendFileName(key)), 4<<20)
+			if e != nil {
+				t.Fatal(e)
 			}
-		}, Inject: func(kind string) EventID { return w.inject(t, kind) }, Restart: func() SeamTransport { return w.restartB(t) }, Calls: w.r.Calls, Dropped: func() uint64 { return w.b.Dropped() }, Logs: func() string { return logs.String() }, StateDirs: []string{w.a.dir, w.b.dir, w.c.dir}, Sentinel: w.sentinel}
-		if os.Getenv("N2_CONFORMANCE_PLANT") == "drop-key" {
-			cw.Fault("drop-key-on-retry")
-		}
-		return cw
-	}})
+			var rec seamSend
+			if e = json.Unmarshal(raw, &rec); e != nil {
+				t.Fatal(e)
+			}
+			counts := map[PrincipalID]int{}
+			for p, part := range rec.Parts {
+				counts[PrincipalID(p)] = w.r.Attempts(part.Wrap.ID)
+			}
+			return counts
+		},
+		PreSubmitFailure: func() context.Context { ctx, cancel := context.WithCancel(context.Background()); cancel(); return ctx },
+		DefiniteRefusal: func() {
+			for _, a := range []*Adapter{w.a, w.b, w.c} {
+				w.r.SetRecipientMode(a.core.Identity(), "reject")
+			}
+		},
+		FailAfterSubmit: func() {
+			original := w.a.publishEvent
+			w.a.publishEvent = func(ctx context.Context, u string, ev *nostr.Event) (relay.OKResult, error) {
+				w.a.publishEvent = original
+				recipient, _ := ev.TagFirst("p")
+				w.r.SetRecipientMode(recipient, "after-submit")
+				defer w.r.SetRecipientMode(recipient, "")
+				call, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+				defer cancel()
+				return original(call, u, ev)
+			}
+		},
+		PartialAck: func() {
+			original := w.a.publishEvent
+			calls := 0
+			w.a.publishEvent = func(ctx context.Context, u string, ev *nostr.Event) (relay.OKResult, error) {
+				calls++
+				if calls == 3 {
+					w.a.publishEvent = original
+					return relay.OKResult{}, context.DeadlineExceeded
+				}
+				return original(ctx, u, ev)
+			}
+		},
+		InduceLoss: func() {
+			// Actual relay retention removes published events, and the injected local
+			// clock exceeds the advertised overlap. Neither the cursor nor result changes.
+			w.r.DiscardEvents()
+			at := time.Now().Add(time.Duration(syncWindow+1) * time.Second)
+			w.b.now = func() time.Time { return at }
+		},
+		UnverifiableSender: func(claim PrincipalID, marker string) EventID { return w.inject(t, claim, marker, time.Now()) },
+		BackdatedPublish:   func(at time.Time) EventID { return w.inject(t, "", "backdated", at) },
+		ForeignCursor: func() Cursor {
+			b, e := w.c.Sync(context.Background(), nil, SyncOptions{Initial: true})
+			if e != nil {
+				t.Fatal(e)
+			}
+			return b.Next
+		},
+		OversizeReceived: func(marker string) error {
+			id := w.inject(t, "", marker+strings.Repeat("x", seamMaxContent), time.Now())
+			_, e := w.b.Event(context.Background(), w.conv, id)
+			return e
+		},
+		WireCalls: w.r.Calls, MessageAtSize: messageAtSize, Logs: func() []string { return []string{logs.String()} },
+	}
+	if os.Getenv("N2_CONFORMANCE_PLANT") == "drop-key" {
+		f.A = &droppedKeyTransport{SeamTransport: f.A}
+	}
+	return f
+}
+
+// The public limit counts the serialized inner transport envelope, not text
+// characters. Outer NIP-44/59 layers have separate protocol size checks.
+func messageAtSize(n int) Message {
+	raw, _ := json.Marshal(wireMessage{Version: 1, Text: ""})
+	return Message{Text: strings.Repeat("x", max(0, n-len(raw)))}
 }
 func mustSend(t *testing.T, w *seamWorld, key, text string) SendResult {
 	t.Helper()
@@ -230,7 +279,7 @@ func TestSeamPartialRestart(t *testing.T) {
 	t.Cleanup(func() { a.Close() })
 	w.r.SetRecipientMode(w.c.core.Identity(), "")
 	two := mustSend(t, w, "partial", "partial")
-	if r.Event != two.Event {
+	if r.Event != "" || EventID(before.Rumor.ID) != two.Event {
 		t.Fatal("restart changed rumor")
 	}
 	after, _ := readPrivate(filepath.Join(w.a.dir, "seam-send", sendFileName("partial")), 2<<20)
@@ -247,8 +296,8 @@ func TestSeamPartialRestart(t *testing.T) {
 		}
 	}
 	for _, receiver := range []*Adapter{w.a, w.b, w.c} {
-		b, e := receiver.Sync(context.Background(), nil, SyncOptions{})
-		if e != nil || len(b.Events) != 1 || b.Events[0].ID != r.Event {
+		b, e := receiver.Sync(context.Background(), nil, SyncOptions{Initial: true})
+		if e != nil || len(b.Events) != 1 || b.Events[0].ID != two.Event {
 			t.Fatal("party missing or duplicate")
 		}
 	}
@@ -256,10 +305,16 @@ func TestSeamPartialRestart(t *testing.T) {
 
 // Definite original refusal differs from lost ACK, false duplicate and timeout.
 func TestSeamRefusalTable(t *testing.T) {
-	for _, mode := range []string{"reject", "after-submit", "silent", "false-duplicate"} {
+	for _, mode := range []string{"reject", "partial-reject", "after-submit", "silent", "false-duplicate"} {
 		t.Run(mode, func(t *testing.T) {
 			w := newSeamWorld(t)
-			if mode == "false-duplicate" {
+			if mode == "reject" {
+				for _, a := range []*Adapter{w.a, w.b, w.c} {
+					w.r.SetRecipientMode(a.core.Identity(), "reject")
+				}
+			} else if mode == "partial-reject" {
+				w.r.SetRecipientMode(w.b.core.Identity(), "reject")
+			} else if mode == "false-duplicate" {
 				w.r.SetRecipientMode(w.b.core.Identity(), "after-submit")
 			} else {
 				w.r.SetRecipientMode(w.b.core.Identity(), mode)
@@ -321,7 +376,7 @@ func TestSeamStateAndConflict(t *testing.T) {
 // Exact content boundary includes JSON-escape worst cases through both NIP44 layers.
 func TestSeamEscapedBoundAndMetadata(t *testing.T) {
 	w := newSeamWorld(t)
-	for i, text := range []string{strings.Repeat("x", seamMaxContent), strings.Repeat("\x00", seamMaxContent), strings.Repeat("\\", seamMaxContent)} {
+	for i, text := range []string{messageAtSize(seamMaxContent).Text, strings.Repeat("\x00", 600), strings.Repeat("\\", 1800)} {
 		mustSend(t, w, fmt.Sprint(i), text)
 	}
 	n := w.r.Calls()
@@ -342,7 +397,7 @@ func TestSeamPrivateFile(t *testing.T) {
 	if e != nil || r.Outcome != ACK {
 		t.Fatal("kind15 send failed", e)
 	}
-	b, e := w.b.Sync(context.Background(), nil, SyncOptions{})
+	b, e := w.b.Sync(context.Background(), nil, SyncOptions{Initial: true})
 	if e != nil || len(b.Events) != 1 || len(b.Events[0].Message.Attachments) != 1 {
 		t.Fatal("file message missing")
 	}
@@ -362,7 +417,7 @@ func TestSeamPrivateFile(t *testing.T) {
 // retain identity and declared gap reasons through time and relay-set changes.
 func TestSeamCursorGapsAndBounds(t *testing.T) {
 	w := newSeamWorld(t)
-	b, e := w.b.Sync(context.Background(), nil, SyncOptions{})
+	b, e := w.b.Sync(context.Background(), nil, SyncOptions{Initial: true})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -397,18 +452,19 @@ func TestSeamCursorGapsAndBounds(t *testing.T) {
 	w.b.core.cfg.ReadRelays = []string{w.r.URL}
 	mustSend(t, w, "one", "one")
 	mustSend(t, w, "two", "two")
-	limited, e := w.b.Sync(context.Background(), nil, SyncOptions{Limit: 1})
+	w.b.batchLimit = 1
+	limited, e := w.b.Sync(context.Background(), nil, SyncOptions{Initial: true})
 	if e != nil || len(limited.Events) != 1 || !hasGap(limited, "timeline_limited") {
 		t.Fatal("bounded batch failed")
 	}
-	next, e := w.b.Sync(context.Background(), limited.Next, SyncOptions{Limit: 1})
+	next, e := w.b.Sync(context.Background(), limited.Next, SyncOptions{})
 	if e != nil || len(next.Events) != 1 || next.Events[0].ID == limited.Events[0].ID {
 		t.Fatal("bounded resume lost/duplicated event")
 	}
 }
 func hasGap(b Batch, reason string) bool {
 	for _, g := range b.Gaps {
-		if g.Reason == reason {
+		if string(g.Reason) == reason {
 			return true
 		}
 	}
@@ -419,7 +475,7 @@ func hasGap(b Batch, reason string) bool {
 func TestSeamSenderIsSeal(t *testing.T) {
 	w := newSeamWorld(t)
 	id := mustSend(t, w, "sender", "sender").Event
-	b, e := w.b.Sync(context.Background(), nil, SyncOptions{})
+	b, e := w.b.Sync(context.Background(), nil, SyncOptions{Initial: true})
 	if e != nil || len(b.Events) != 1 || b.Events[0].ID != id || b.Events[0].Sender != PrincipalID(w.a.core.Identity()) {
 		t.Fatal("sender is not authenticated seal signer")
 	}
@@ -436,7 +492,7 @@ func TestSeamSenderIsSeal(t *testing.T) {
 func TestSeamMediaMarker(t *testing.T) {
 	w := newSeamWorld(t)
 	marker := "N2-PRIVATE-MEDIA-MARKER"
-	ref := mediaRef([]byte(marker))
+	ref := mediaRef(marker)
 	var out bytes.Buffer
 	n := w.r.Calls()
 	_, e := w.b.Download(context.Background(), ref, &out, 1024)
@@ -494,7 +550,7 @@ func TestSeamMissingKeyRefusesUnchanged(t *testing.T) {
 }
 
 // The drop-key fault hook is a deliberately broken transport wrapper. The real
-// provisional runner must reject its retry, specifically at logical identity.
+// upstream runner must reject its retry, specifically at logical identity.
 type droppedKeyTransport struct {
 	SeamTransport
 	serial int
@@ -505,11 +561,11 @@ func (d *droppedKeyTransport) Send(ctx context.Context, r SendRequest) (SendResu
 	r.IdempotencyKey += fmt.Sprint("-lost-", d.serial)
 	return d.SeamTransport.Send(ctx, r)
 }
-func TestProvisionalDropKeyHookControl(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=^TestProvisionalConformance/idempotent_retry$", "-test.v")
+func TestUpstreamDropKeyHookControl(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestUpstreamConformance/send_idempotency$", "-test.v")
 	cmd.Env = append(os.Environ(), "N2_CONFORMANCE_PLANT=drop-key")
 	output, e := cmd.CombinedOutput()
-	if e == nil || !bytes.Contains(output, []byte("idempotency key retry changed logical event")) {
+	if e == nil || !bytes.Contains(output, []byte("idempotency key retry created a second logical event")) {
 		t.Fatal("drop-key hook did not fail intended conformance assertion")
 	}
 }
