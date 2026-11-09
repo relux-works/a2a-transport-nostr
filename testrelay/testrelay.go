@@ -76,7 +76,8 @@ func containsStr(xs []string, v string) bool {
 
 // Options controls negative-test relay behaviours.
 type Options struct {
-	RequireAuth bool // NIP-42: challenge every connection first
+	TrueDuplicate bool // Return OK true on duplicate; false preserves legacy fixture behavior.
+	RequireAuth   bool // NIP-42: challenge every connection first
 	// OKMode: "" normal, "reject" (OK false blocked:), "silent" (never answer OK).
 	OKMode string
 	// LooseAuthors makes REQ matching ignore the authors filter,
@@ -93,10 +94,13 @@ type Relay struct {
 	ln     net.Listener
 	server *http.Server
 
-	mu     sync.Mutex
-	events []*nostr.Event
-	seen   map[string]bool
-	subs   map[*conn]map[string][]*Filter
+	mu       sync.Mutex
+	events   []*nostr.Event
+	seen     map[string]bool
+	subs     map[*conn]map[string][]*Filter
+	modes    map[string]string
+	calls    int
+	attempts map[string]int
 }
 
 type conn struct {
@@ -122,10 +126,11 @@ func StartWithOptions(opts Options) (*Relay, error) {
 		return nil, err
 	}
 	r := &Relay{
-		opts: opts,
-		URL:  fmt.Sprintf("ws://%s", ln.Addr().String()),
-		ln:   ln,
-		seen: map[string]bool{},
+		opts:  opts,
+		URL:   fmt.Sprintf("ws://%s", ln.Addr().String()),
+		ln:    ln,
+		seen:  map[string]bool{},
+		modes: map[string]string{}, attempts: map[string]int{},
 		subs: map[*conn]map[string][]*Filter{},
 	}
 	mux := http.NewServeMux()
@@ -137,11 +142,26 @@ func StartWithOptions(opts Options) (*Relay, error) {
 
 // Close shuts the relay down.
 func (r *Relay) Close() {
+	r.mu.Lock()
+	for c := range r.subs {
+		_ = c.ws.Close()
+	}
+	r.mu.Unlock()
 	if r.server != nil {
 		_ = r.server.Close()
 	}
 	_ = r.ln.Close()
 }
+
+// SetRecipientMode changes only the local test relay's publish fault for a key.
+// Modes: silent, after-submit (store without response), reject, false-duplicate.
+func (r *Relay) SetRecipientMode(key, mode string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.modes[key] = mode
+}
+func (r *Relay) Calls() int             { r.mu.Lock(); defer r.mu.Unlock(); return r.calls }
+func (r *Relay) Attempts(id string) int { r.mu.Lock(); defer r.mu.Unlock(); return r.attempts[id] }
 
 // Events returns a copy of stored events (oldest first) for asserts.
 func (r *Relay) Events() []*nostr.Event {
@@ -194,6 +214,11 @@ func (r *Relay) dispatch(c *conn, raw []byte) {
 	}
 	var typ string
 	_ = json.Unmarshal(msg[0], &typ)
+	if typ != "CLOSE" {
+		r.mu.Lock()
+		r.calls++
+		r.mu.Unlock()
+	}
 	switch typ {
 	case "AUTH":
 		if len(msg) != 2 {
@@ -209,6 +234,9 @@ func (r *Relay) dispatch(c *conn, raw []byte) {
 		}
 		return
 	case "EVENT":
+		if len(msg) != 2 {
+			return
+		}
 		if r.opts.RequireAuth && !c.authed {
 			var probe struct {
 				ID string `json:"id"`
@@ -233,6 +261,18 @@ func (r *Relay) dispatch(c *conn, raw []byte) {
 			_ = c.sendJSON([]any{"OK", ev.ID, false, "invalid: " + err.Error()})
 			return
 		}
+		recipient, _ := ev.TagFirst("p")
+		r.mu.Lock()
+		mode := r.modes[recipient]
+		r.attempts[ev.ID]++
+		r.mu.Unlock()
+		if mode == "silent" {
+			return
+		}
+		if mode == "reject" {
+			_ = c.sendJSON([]any{"OK", ev.ID, false, "blocked: test refusal"})
+			return
+		}
 		if r.opts.OKMode == "reject" {
 			_ = c.sendJSON([]any{"OK", ev.ID, false, "blocked: test relay rejects everything"})
 			return
@@ -240,14 +280,19 @@ func (r *Relay) dispatch(c *conn, raw []byte) {
 		r.mu.Lock()
 		if r.seen[ev.ID] {
 			r.mu.Unlock()
-			_ = c.sendJSON([]any{"OK", ev.ID, false, "duplicate: already have this event"})
+			if mode == "after-submit" {
+				return
+			}
+			_ = c.sendJSON([]any{"OK", ev.ID, r.opts.TrueDuplicate && mode != "false-duplicate", "duplicate: already have this event"})
 			return
 		}
 		r.seen[ev.ID] = true
 		r.events = append(r.events, ev)
 		targets := r.matchingSubsLocked(ev)
 		r.mu.Unlock()
-		_ = c.sendJSON([]any{"OK", ev.ID, true, ""})
+		if mode != "after-submit" {
+			_ = c.sendJSON([]any{"OK", ev.ID, true, ""})
+		}
 		for _, t := range targets {
 			_ = t.c.sendJSON([]any{"EVENT", t.subID, ev})
 		}

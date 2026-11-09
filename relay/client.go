@@ -7,6 +7,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ type Filter struct {
 
 // OKResult classifies a relay OK reply.
 type OKResult struct {
+	Original  bool // A syntactically valid OK frame for this original event, not a local connection error.
 	Accepted  bool
 	Duplicate bool // OK false with a "duplicate:" reason still means stored
 	Reason    string
@@ -70,6 +72,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	conn.SetReadLimit(256 << 10)
 	c.conn = conn
 	c.waiters = map[string]chan OKResult{}
 	c.subs = map[string]Filter{}
@@ -98,6 +101,7 @@ func (c *Client) writeJSON(v any) error {
 	if c.conn == nil {
 		return fmt.Errorf("relay: not connected")
 	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return c.conn.WriteJSON(v)
 }
 
@@ -105,9 +109,11 @@ func (c *Client) pump(conn *websocket.Conn) {
 	var pumpErr error
 	defer func() {
 		c.mu.Lock()
-		if c.conn == conn {
-			c.conn = nil
+		if c.conn != conn {
+			c.mu.Unlock()
+			return
 		}
+		c.conn = nil
 		waiters := c.waiters
 		c.waiters = map[string]chan OKResult{}
 		errCh := c.pumpErr
@@ -141,15 +147,15 @@ func (c *Client) pump(conn *websocket.Conn) {
 			}
 			var id, reason string
 			var accepted bool
-			_ = json.Unmarshal(msg[1], &id)
-			_ = json.Unmarshal(msg[2], &accepted)
-			_ = json.Unmarshal(msg[3], &reason)
+			if json.Unmarshal(msg[1], &id) != nil || json.Unmarshal(msg[2], &accepted) != nil || json.Unmarshal(msg[3], &reason) != nil {
+				continue
+			}
 			c.mu.Lock()
 			ch := c.waiters[id]
 			delete(c.waiters, id)
 			c.mu.Unlock()
 			if ch != nil {
-				ch <- OKResult{Accepted: accepted,
+				ch <- OKResult{Original: true, Accepted: accepted,
 					Duplicate: !accepted && strings.HasPrefix(reason, "duplicate:"),
 					Reason:    reason}
 			}
@@ -302,19 +308,45 @@ func (c *Client) Unsubscribe(subID string) error {
 // It temporarily takes over the event handler, so callers use one
 // Client per query stream; Subscribe and Query must not share a
 // client concurrently.
+// ErrQueryLimit marks a bounded incomplete backlog, never a successful EOSE.
+var ErrQueryLimit = errors.New("relay: query limit")
+
 func (c *Client) Query(ctx context.Context, subID string, f Filter) ([]*nostr.Event, error) {
+	return c.QueryBounded(ctx, subID, f, 4096)
+}
+
+// QueryBounded returns a detached bounded snapshot and closes its callback on
+// timeout/failure. A delayed callback cannot race with or mutate returned data.
+func (c *Client) QueryBounded(ctx context.Context, subID string, f Filter, limit int) ([]*nostr.Event, error) {
+	if limit < 1 || limit > 4096 {
+		return nil, ErrQueryLimit
+	}
+	var mu sync.Mutex
 	var out []*nostr.Event
+	var stopped, limited bool
 	done := make(chan struct{})
 	var once sync.Once
 	err := c.Subscribe(ctx, subID, f, func(id string, ev *nostr.Event, eose bool) {
 		if id != subID {
 			return
 		}
+		mu.Lock()
+		defer mu.Unlock()
+		if stopped {
+			return
+		}
 		if eose {
+			stopped = true
 			once.Do(func() { close(done) })
 			return
 		}
 		if ev != nil {
+			if len(out) == limit {
+				limited = true
+				stopped = true
+				once.Do(func() { close(done) })
+				return
+			}
 			out = append(out, ev)
 		}
 	})
@@ -329,10 +361,18 @@ func (c *Client) Query(ctx context.Context, subID string, f Filter) ([]*nostr.Ev
 	}
 	select {
 	case <-done:
-		return out, nil
 	case <-ctx.Done():
-		return out, ctx.Err()
+		err = ctx.Err()
+	case <-c.PumpErr():
+		err = errors.New("relay: query disconnected")
 	}
+	mu.Lock()
+	defer mu.Unlock()
+	stopped = true
+	if limited {
+		err = ErrQueryLimit
+	}
+	return append([]*nostr.Event(nil), out...), err
 }
 
 // PumpErr exposes the pump termination error (Subscribe loops).
