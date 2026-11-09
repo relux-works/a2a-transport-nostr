@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -36,6 +37,10 @@ func main() {
 	}
 	must(os.MkdirAll(dest, 0700))
 	plants := []plant{
+		{"principal-hook-missing", "nostrtransport/adapter_test.go", "PrincipalReferences:    w.principalReferences", "PrincipalReferences:    nil", "TestConformanceReferenceHooks", "missing PrincipalReferences hook"},
+		{"conversation-hook-missing", "nostrtransport/adapter_test.go", "ConversationReferences: w.conversationReferences", "ConversationReferences: nil", "TestConformanceReferenceHooks", "missing ConversationReferences hook"},
+		{"principal-hook-valid-twice", "nostrtransport/adapter_conformance_test.go", "return w.b.core.Identity(), unsupportedNpub", "return w.b.core.Identity(), w.b.core.Identity()", "TestUpstreamConformance/addressing/principal_references", "invalid principal reference accepted"},
+		{"conversation-hook-valid-twice", "nostrtransport/adapter_conformance_test.go", "return string(w.conv), \"{}\"", "return string(w.conv), string(w.conv)", "TestUpstreamConformance/addressing/conversation_references", "invalid conversation reference accepted"},
 		{"stored-duplicate", "nostrtransport/adapter_send.go", "ok.Original && ok.Stored()", "ok.Original && ok.Accepted", "TestSeamDuplicateRecovery/false-duplicate", "stored duplicate did not ACK original event"},
 		{"drop-key", "nostrtransport/adapter_send.go", "name := sendFileName(req.IdempotencyKey)", "req.IdempotencyKey += time.Now().String(); name := sendFileName(req.IdempotencyKey)", "TestUpstreamConformance/send_idempotency", "idempotency key retry created a second logical event"},
 		{"wrap-sender", "nostrtransport/adapter_sync.go", "Sender: PrincipalID(dm.SenderHex)", "Sender: PrincipalID(dm.WrapperHex)", "TestSeamSenderIsSeal", "sender is not authenticated seal signer"},
@@ -73,7 +78,12 @@ func main() {
 		cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "./nostrtransport", "-run", "^"+p.Test+"$", "-v")
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "GOWORK=off")
-		log, e := cmd.CombinedOutput()
+		var output bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &output, &output
+		must(cmd.Start())
+		pid := cmd.Process.Pid
+		e = cmd.Wait()
+		log := append([]byte(fmt.Sprintf("owned test-command PID %d\n", pid)), output.Bytes()...)
 		cancel()
 		code := 0
 		if e != nil {
@@ -82,7 +92,9 @@ func main() {
 				code = x.ExitCode()
 			}
 		}
-		detected := code != 0 && strings.Contains(string(log), p.Witness) && !strings.Contains(string(log), "[build failed]")
+		detected := code == 1 && strings.Contains(string(log), "--- FAIL: "+p.Test) &&
+			strings.Contains(string(log), p.Witness) && !strings.Contains(string(log), "[build failed]") &&
+			!strings.Contains(string(log), "panic:")
 		all = all && detected
 		must(os.WriteFile(filepath.Join(dest, p.Name+".log"), log, 0600))
 		results = append(results, result{p.Name, p.File, hex.EncodeToString(sum[:]), p.Test, p.Witness, code, detected})

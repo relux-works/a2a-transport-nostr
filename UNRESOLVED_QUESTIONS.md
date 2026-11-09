@@ -1,40 +1,41 @@
 # Pending integration and explicit limits
 
-## Upstream #381 and qualification limits
+## N3a partial qualification and upstream #416
 
-N2-02 binds actual landed T0 commit
-`627be63050714d918fcb9fcfbaa348b70e0b104b` with no upstream modifications.
-All 20 upstream groups pass locally. Independent review and maintainer-owned
-hosted checks/landing remain separate gates.
+N3a binds actual upstream commit
+`0f73388cbc7ac3e719475a82c6f669e60851d116` with no upstream modifications.
+All 20 top-level conformance groups and both addressing reference subgroups
+pass locally. `raw_bounds/received` is the **one allowed explicit SKIP**,
+pending upstream contract ruling integration (#416). Independent review,
+maintainer-owned hosted checks and landing remain separate gates.
 
-The following observations concern `transport/conformancetest/conformance.go`
-at that exact upstream commit. They are not adapter workarounds:
+The addressing hooks now supply this adapter's real supported/unsupported
+grammar rather than relying on upstream synthetic marker strings. The
+principal hook supplies canonical B hex versus a genuine unsupported npub;
+the conversation hook supplies canonical shared JSON versus invalid JSON.
+The updated upstream unverifiable-sender group also rejects any delivered
+event attributed to the claimed B, even when the forged event ID is rewritten.
 
-- `addressing` (line 573): the negative cases synthesize `invalid-<marker>`
-  and `unknown-<marker>`. Both are invalid in this adapter's supported grammar
-  (canonical lowercase 64-hex principal and participant/subject JSON), so no
-  honest Nostr addressing case failed. This does not establish those strings
-  are invalid for every external transport. Npub input is not claimed here.
-- `raw_bounds` (line 722): checks lengths after a normal small message; there
-  is no oversized-Raw injection hook. An implementation that only fails on
-  large incoming events could pass. Nostr leaves Raw empty and separately
-  tests a genuinely oversized, signed wrap at its receive verifier boundary;
-  this does not strengthen the unchanged upstream group or claim live relay
-  delivery of a >1 MiB frame (the relay client itself caps frames at 256 KiB).
-- `unverifiable_sender` (line 447): the hook claims existing B; the group
-  checks absence of the returned bad EventID and positive Dropped, beside one
-  good ID. It does not reject a forged event with a different ID or verify the
-  sender of every other event. Local `TestSeamImpersonationNeighbors` checks
-  the whole delivery set, sender, marker and two existing-principal claims.
-  That supplemental evidence is not an upstream #381 resolution.
-- `outcome_discipline`'s pre-submit hook returns a context; this harness uses
-  actual cancellation before any submission. It proves that concrete failure
-  path, not every possible transient setup/transport failure. No marker-based
-  special case or synthetic SendResult is used.
+At this exact pin, `ReceivedRawAtSize(MaxRawBytes)` must produce an authenticated
+event with exactly 1 MiB of returned Raw on Sync, History and Event. This conflicts
+with the adapter's intentional empty Raw projection and 256 KiB relay frame and
+saved-event read ceilings. Padding an Event, bypassing the real relay, or changing
+only test limits would not establish the requested behavior. The hook remains
+nil and its skipped checks are unverified, never reported as passed. The existing
+local oversized signed-wrap test exercises the receive verifier directly; it
+makes no >1 MiB relay round-trip claim.
 
-No upstream grammar failure was encountered. The first integration run failed
-only the fixture root mode (Go TempDir used 0755); the fixture now creates its
-owned root with 0700. No production permission rule was weakened.
+Upstream has ruled that Raw is optional and a lower transport-declared Raw
+ceiling is allowed. Planned #416 adds `Caps.MaxRawBytes`: zero requires empty
+Raw, positive values declare an exposed Raw bound. The wire ceiling remains a
+separate limit. That API is not present at the pinned commit and is not assumed
+by this adapter. Follow-up requires the landed upstream head and honest receive
+controls under that contract before claiming zero SKIPs. No Raw exposure,
+privacy-policy change or wire/cache limit expansion is authorized by N3a.
+
+The pre-submit hook uses actual cancellation before submission. It proves that
+concrete failure path, not all transient setup/transport failures. No
+marker-based special case or synthetic SendResult is used.
 
 ## Declared v1 limits (not unresolved implementation promises)
 

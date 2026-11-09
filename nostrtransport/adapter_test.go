@@ -158,6 +158,10 @@ func upstreamFixture(t *testing.T) *conformancetest.Fixture {
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(oldLog) })
 	f := &conformancetest.Fixture{A: w.a, B: w.b, C: w.c, Conversation: w.conv,
+		PrincipalReferences:    w.principalReferences,
+		ConversationReferences: w.conversationReferences,
+		// ReceivedRawAtSize stays nil pending the upstream Raw contract update:
+		// this adapter intentionally omits Raw and has a stricter wire ceiling.
 		Extensions: map[string]json.RawMessage{"opaque.test": json.RawMessage(`"valid extension"`)},
 		StateDir:   w.root, SentinelDir: w.sentinel,
 		RestartB: func() SeamTransport { return w.restartB(t) },

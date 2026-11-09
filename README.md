@@ -20,19 +20,34 @@ write relay is required; defaults and authenticated discovery use the
 existing routing implementation. No public relay is contacted by default.
 
 The adapter imports `github.com/relux-works/a2a-swarm/transport` at
-`v0.0.0-20261109081233-627be6305071`, exactly upstream commit
-`627be63050714d918fcb9fcfbaa348b70e0b104b`. The pseudo-version and `go.sum`
+`v0.0.0-20261109134727-0f73388cbc7a`, exactly upstream commit
+`0f73388cbc7ac3e719475a82c6f669e60851d116`. The pseudo-version and `go.sum`
 pin the source without a checkout-local replace. Package initialization
 registers `nostr`; `RegistrationError` exposes a registration conflict without
 panicking. The disposable provisional package has been deleted.
 
-`TestUpstreamConformance` invokes that commit's actual `conformancetest.Run`
-and all 20 groups. The harness uses local Nostr/Blossom servers, actual relay
-attempt counts, a one-shot lost ACK, a failure before the third recipient's
-publish, definite relay refusals, cancellation before submission, relay
-retention loss, and a seal/rumor impersonation of an existing principal.
-No upstream source is patched. See `UNRESOLVED_QUESTIONS.md` for upstream
-#381 coverage limits; passing these groups is not external deployment admission.
+`TestUpstreamConformance` invokes that commit's unchanged `conformancetest.Run`.
+At `0f73388cbc7ac3e719475a82c6f669e60851d116`, all 20 top-level groups and both
+addressing reference subgroups PASS. There is exactly one explicit SKIP:
+**`raw_bounds/received` — pending upstream contract ruling integration (#416)**.
+This is partial qualification, not an unqualified T0 conformance claim.
+
+`PrincipalReferences` supplies the actual B identity in canonical lowercase hex
+and a genuine NIP-19 npub reference that this adapter must refuse.
+`ConversationReferences` supplies the actual shared canonical participant JSON
+and a grammar-invalid neighbor. Supplemental parser controls cover malformed
+and uppercase keys, invalid curve points, noncanonical conversations and missing
+self membership, beside valid references and with no relay I/O.
+
+The harness uses local Nostr/Blossom servers, actual relay attempt counts,
+a one-shot lost ACK, a failure before the third recipient's publish, definite
+relay refusals, cancellation before submission, relay retention loss, and a
+seal/rumor impersonation of an existing principal. No upstream source is patched.
+`ReceivedRawAtSize` remains nil because the pinned group requires exactly 1 MiB
+of returned Raw, while this adapter intentionally omits Raw and uses a 256 KiB
+wire/cache ceiling. Upstream has ruled that Raw is optional; #416's contract
+implementation and a successor pin are pending. No Raw fabrication or size-limit
+change is used to make this run pass. See `UNRESOLVED_QUESTIONS.md`.
 
 ### Delivery and state
 
@@ -153,8 +168,9 @@ includes logs and `results.json` with source hashes, exits and expected failure
 witnesses. Existing output paths are never overwritten. Compile/setup failures
 are not detections. Tests cover valid neighbors, receipt loss, partial ACK,
 restart, foreign/incomplete cursors, backdated publication, sender mismatch,
-media secrecy, corrupt state and content bounds. The upstream runner's
-fault hook that loses retry keys has its own bounded subprocess control.
+media secrecy, corrupt state and content bounds. The two addressing hooks have removal and valid-for-both reference plants;
+the upstream runner's fault hook that loses retry keys has its own bounded
+subprocess control.
 Formatting is owned by the pinned upstream MediaRef type; local controls no
 longer mutate its deleted provisional implementation. The log-disclosure
 control still plants a real adapter log call. Guard logs belong under `.temp/`.

@@ -10,8 +10,8 @@ github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 h1:NMZiJj8QnKe1LgsbDayM4UoHwbvw
 github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0/go.mod h1:ZXNYxsqcloTdSy/rNShjYzMhyjf0LaoftYK0p+A3h40=
 github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
-github.com/relux-works/a2a-swarm v0.0.0-20261109081233-627be6305071 h1:WcAXVgRtCOuGbEbDZWCX/yv02MyPGC4kJ2n+FfNIZxs=
-github.com/relux-works/a2a-swarm v0.0.0-20261109081233-627be6305071/go.mod h1:osjq8wdh1QLejmJFxo+3BSM6MUFN6KEh9OzOrnP+4R0=
+github.com/relux-works/a2a-swarm v0.0.0-20261109134727-0f73388cbc7a h1:eW7mjY4MUXFcDhjGZaDJqVtdTMIrlq7SLMdAu+OBSUA=
+github.com/relux-works/a2a-swarm v0.0.0-20261109134727-0f73388cbc7a/go.mod h1:osjq8wdh1QLejmJFxo+3BSM6MUFN6KEh9OzOrnP+4R0=
 golang.org/x/crypto v0.55.0 h1:+KWHjbgOaAQ66dh/YlkZKHlz9ZUlq61AFirAR9ntP8M=
 golang.org/x/crypto v0.55.0/go.mod h1:uq0V9dE/fzQuJtbnL+2EhWOE63vo164FY8xqEnV9xis=
 golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=
