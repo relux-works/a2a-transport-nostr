@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"relux.works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
 )
 
 // Server holds blobs in memory, keyed by sha256 hex.

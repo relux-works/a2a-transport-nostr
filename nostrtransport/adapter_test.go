@@ -16,10 +16,10 @@ import (
 
 	seam "github.com/relux-works/a2a-swarm/transport"
 	"github.com/relux-works/a2a-swarm/transport/conformancetest"
-	"relux.works/a2a-transport-nostr/nostr"
-	"relux.works/a2a-transport-nostr/relay"
-	"relux.works/a2a-transport-nostr/testblossom"
-	"relux.works/a2a-transport-nostr/testrelay"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/relay"
+	"github.com/relux-works/a2a-transport-nostr/testblossom"
+	"github.com/relux-works/a2a-transport-nostr/testrelay"
 )
 
 type seamWorld struct {

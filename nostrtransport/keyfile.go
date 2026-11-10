@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"relux.works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
 )
 
 // LoadKey loads a BIP-340 identity key from a file that must be a

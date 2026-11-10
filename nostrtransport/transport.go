@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"relux.works/a2a-transport-nostr/blossom"
-	"relux.works/a2a-transport-nostr/nostr"
-	"relux.works/a2a-transport-nostr/relay"
-	"relux.works/a2a-transport-nostr/transport"
+	"github.com/relux-works/a2a-transport-nostr/blossom"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/relay"
+	"github.com/relux-works/a2a-transport-nostr/transport"
 )
 
 // Errors returned by the transport.

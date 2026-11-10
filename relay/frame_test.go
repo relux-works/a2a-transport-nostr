@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"relux.works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
 )
 
 func frameEvent(id string) *nostr.Event {

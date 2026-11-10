@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"relux.works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
 )
 
 type wireMessage struct {

@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"relux.works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
 )
 
 type privateMedia struct {

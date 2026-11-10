@@ -15,7 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"relux.works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
 )
 
 // Filter is a NIP-01 subscription filter (subset).

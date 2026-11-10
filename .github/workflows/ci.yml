@@ -21,8 +21,9 @@ jobs:
           go-version: '1.26.8'
           check-latest: false
           cache: false
-      - name: Fetch and verify pinned modules
+      - name: Check module identity and verify pinned modules
         run: |
+          test "$(go list -m)" = github.com/relux-works/a2a-transport-nostr
           go mod download
           go mod verify
       - name: Vet, race tests and build

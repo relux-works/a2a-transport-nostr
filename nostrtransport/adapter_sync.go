@@ -9,8 +9,8 @@ import (
 	"sort"
 	"time"
 
-	"relux.works/a2a-transport-nostr/nostr"
-	"relux.works/a2a-transport-nostr/relay"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/relay"
 )
 
 const seamSeenLimit = 4096

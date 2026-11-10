@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"relux.works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
 )
 
 // Client talks to Blossom servers. Signer authorizes uploads.

@@ -5,6 +5,27 @@ NIP-59 seals/gift wraps, NIP-65/10050 routing, NIP-42 relay authentication
 and Blossom encrypted media. The authenticated sender is the seal signer;
 it must equal the rumor pubkey. The ephemeral wrapper is never identity.
 
+## Go module
+
+The canonical module path is `github.com/relux-works/a2a-transport-nostr`.
+Consumers import the adapter as:
+
+```go
+import "github.com/relux-works/a2a-transport-nostr/nostrtransport"
+```
+
+After the reviewed `v0.1.0` tag is published, add the dependency from the
+consumer's module root:
+
+```sh
+go get github.com/relux-works/a2a-transport-nostr@v0.1.0
+```
+
+Use the published module directly, without a checkout-local `replace`. The
+previous vanity module path is retired; it has no module-discovery service.
+This path migration does not publish a release by itself or change the pinned
+`github.com/relux-works/a2a-swarm/transport` dependency described below.
+
 ## T0 adapter
 
 `nostrtransport.Open(SeamConfig)` creates one exclusive adapter from an
@@ -170,6 +191,7 @@ Blossom servers; no mainnet, real wallet, live relay or deployment is needed.
 Run from the module root with the pinned toolchain in CI:
 
 ```sh
+test "$(go list -m)" = github.com/relux-works/a2a-transport-nostr
 go mod verify
 go vet ./...
 go test -race -count=1 ./...
@@ -177,6 +199,10 @@ go test -count=1 ./nostrtransport -run '^TestUpstreamConformance$' -v
 go build -trimpath ./...
 go run .scripts/check-guards.go -out .temp/controls-01
 ```
+
+CI checks the canonical module identity before downloading and verifying the
+pinned dependencies. A different module path fails that step; its diagnostics
+and the remaining checks appear in the CI job log.
 
 `.scripts/check-guards.go` copies this module into isolated `.temp/` fixtures,
 plants one defect per run and invokes the corresponding assertion. Output

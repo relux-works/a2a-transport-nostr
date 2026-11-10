@@ -11,8 +11,8 @@ import (
 	"time"
 
 	seam "github.com/relux-works/a2a-swarm/transport"
-	"relux.works/a2a-transport-nostr/nostr"
-	"relux.works/a2a-transport-nostr/relay"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/relay"
 )
 
 // Explicit To sends once to B and self, never C; the empty-To neighbor reaches

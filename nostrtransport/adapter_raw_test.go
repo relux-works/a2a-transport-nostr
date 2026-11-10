@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"relux.works/a2a-transport-nostr/nostr"
-	"relux.works/a2a-transport-nostr/relay"
+	"github.com/relux-works/a2a-transport-nostr/nostr"
+	"github.com/relux-works/a2a-transport-nostr/relay"
 )
 
 // Publishes an authenticated A-to-B gift wrap of exactly n serialized event

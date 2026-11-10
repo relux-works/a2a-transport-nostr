@@ -1,4 +1,4 @@
-module relux.works/a2a-transport-nostr
+module github.com/relux-works/a2a-transport-nostr
 
 go 1.26.0
 
