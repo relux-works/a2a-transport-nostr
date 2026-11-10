@@ -23,6 +23,9 @@ type result struct {
 }
 
 var plants = []plant{
+	{"extension_key_encoding", ".", "nostrtransport/grant_extension.go", "raw, e := marshalEnvelope(ordinary)", "raw, e := json.Marshal(ordinary)", "^TestSJ1TKeyRoundTrip$", "SJ1T legal key send refused", "./nostrtransport"},
+	{"envelope_key_encoding", ".", "nostrtransport/adapter_send.go", "body, _ := marshalEnvelope(w)", "body, _ := json.Marshal(w)", "^TestSJ1TKeyRoundTrip$", "SJ1T wire key escaped", "./nostrtransport"},
+	{"cache_key_encoding", ".", "nostrtransport/adapter_sync.go", "raw, _ := marshalEnvelope(s)", "raw, _ := json.Marshal(s)", "^TestSJ1TKeyRoundTrip$", "SJ1T cache key escaped", "./nostrtransport"},
 	{"shared_duplicate", ".", "internal/strictjson/json.go", "!ok || seen[key] ||", "!ok || false ||", "^TestSJ1Guard$", "SJ1 ambiguous JSON admitted", "./internal/strictjson"},
 	{"shared_escape", ".", "internal/strictjson/json.go", "bytes.IndexByte(raw[start:d.InputOffset()], '\\\\') >= 0", "false && start >= 0", "^TestSJ1Guard$", "SJ1 ambiguous JSON admitted", "./internal/strictjson"},
 	{"typed_map_alias", ".", "internal/strictjson/json.go", "case reflect.Map:", "case reflect.Map:\n return nil\n case reflect.Invalid:", "^TestSJ1Guard$", "typed map alias admitted", "./internal/strictjson"},

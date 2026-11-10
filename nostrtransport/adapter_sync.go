@@ -146,7 +146,7 @@ func (a *Adapter) syncLocked(ctx context.Context, from Cursor, opt SyncOptions) 
 				c.Rumors[string(s.ID)] = max(c.Rumors[string(s.ID)], wrap.CreatedAt)
 				continue
 			}
-			raw, _ := json.Marshal(s)
+			raw, _ := marshalEnvelope(s)
 			if writeFileFsync(filepath.Join(a.dir, "seam-events"), string(s.ID)+".json", raw) != nil {
 				return Batch{}, seamError("unavailable")
 			}

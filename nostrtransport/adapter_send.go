@@ -1,6 +1,7 @@
 package nostrtransport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -21,6 +22,20 @@ type wireMessage struct {
 	Thread     EventID                    `json:"thread,omitempty"`
 	Media      []json.RawMessage          `json:"media,omitempty"`
 	Extensions map[string]json.RawMessage `json:"extensions,omitempty"`
+}
+
+// marshalEnvelope preserves legal raw keys in extension objects, including
+// nested RawMessages. Keep comparison hashes and event-string serialization on
+// their existing encoding: escaping an outer string value does not change the
+// enclosed envelope after decoding. Encoder's delimiter is not content bytes.
+func marshalEnvelope(v any) ([]byte, error) {
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), nil
 }
 
 func toWire(m Message) (wireMessage, error) {
@@ -49,11 +64,11 @@ func toWire(m Message) (wireMessage, error) {
 	}
 	base := w
 	base.Extensions = ordinary
-	baseRaw, e := json.Marshal(base)
+	baseRaw, e := marshalEnvelope(base)
 	if e != nil || len(baseRaw) > baseMaxContent {
 		return w, seamError("content_too_large")
 	}
-	raw, err := json.Marshal(w)
+	raw, err := marshalEnvelope(w)
 	if err != nil || len(raw) > seamMaxContent {
 		return w, seamError("content_too_large")
 	}
@@ -139,7 +154,7 @@ func (a *Adapter) Send(ctx context.Context, req SendRequest) (SendResult, error)
 	} else if !os.IsNotExist(err) {
 		return SendResult{Outcome: UNKNOWN}, nil
 	} else {
-		body, _ := json.Marshal(w)
+		body, _ := marshalEnvelope(w)
 		kind := nostr.KindRumor
 		content := string(body)
 		opts := nostr.RumorOptions{Subject: c.S, ReplyTo: string(w.Re), Root: string(w.Thread), A2AKind: w.Kind}

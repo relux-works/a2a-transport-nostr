@@ -25,8 +25,24 @@ simple wire structs, not a general reflection decoder with embedded-field or
 custom-unmarshaler schema support. Errors contain no input keys or values.
 
 For outgoing extensions supplied as Go maps, check both the raw values and the
-serialized map before any signing/persistence. Names requiring escaped spelling
-in the module's JSON encoding are refused. Incoming original bytes are checked
+serialized map before any signing/persistence. Envelope/extension encoding and
+receive-cache persistence disable HTML escaping: literal `<`, `>` and `&` keys
+round-trip, including inside raw extension objects. Comparison hashes, durable
+send checksums and NIP-01 serialization retain their existing encoding. A JSON
+envelope inside an event's content/tag is a string value: escaping that outer
+string does not change the envelope's keys after string decoding.
+
+Top-level extension map keys containing U+2028 (LINE SEPARATOR) or U+2029
+(PARAGRAPH SEPARATOR) remain refused: Go escapes these even with
+`SetEscapeHTML(false)`. Keys needing mandatory JSON escapes (quote, backslash,
+control characters) are also refused. Literal separators in raw nested objects
+are not subject to Go map-key re-encoding; the ordinary lexical rule applies.
+Messages from v0.2.0 with already escaped keys, including `\u003c`, `\u003e`,
+`\u0026`, `\u2028` and `\u2029`, remain refused on receive. This compatibility
+break is intentional under SJ1; disabling output HTML escaping does not relax
+the incoming rule. Ordinary string value escapes remain legal.
+
+Incoming original bytes are checked
 before they can collapse into a map. No canonical re-encoding is used to repair
 an ambiguous input, and NIP-01 signing serialization is unchanged.
 

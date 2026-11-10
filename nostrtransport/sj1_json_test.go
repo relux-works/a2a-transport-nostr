@@ -30,7 +30,7 @@ func TestSJ1InboundEnvelope(t *testing.T) {
 	w := newSeamWorld(t)
 	c, _ := w.a.conversation(w.conv)
 	grant, _ := EncodeGrantPresentation(grantFixture(1))
-	ext := `{"` + GrantExtension + `":` + string(grant) + `}`
+	ext := `{"<tag>&":1,"` + GrantExtension + `":` + string(grant) + `}`
 	valid := `{"v":1,"text":"line\nvalue","extensions":` + ext + `}`
 	cases := sj1Variants(valid, "extensions", ext, `[]`)
 	for _, value := range sj1Variants(ext, GrantExtension, string(grant), `{"v":9}`) {
@@ -38,6 +38,13 @@ func TestSJ1InboundEnvelope(t *testing.T) {
 	}
 	for _, value := range []string{`{"x":1,"x":2}`, `{"x":2,"x":1}`, `{"x":1,"\u0078":2}`, `{"\u0078":1}`} {
 		cases = append(cases, `{"v":1,"text":"line\nvalue","extensions":{"ordinary":`+value+`}}`)
+	}
+	// Each HTML-sensitive escape and duplicate order is independently refused.
+	for _, key := range []string{`\u003ctag>&`, `<tag\u003e&`, `<tag>\u0026`} {
+		cases = append(cases, strings.Replace(valid, `"<tag>&":1`, `"`+key+`":1`, 1))
+	}
+	for _, pair := range []string{`"<tag>&":1,"<tag>&":2`, `"<tag>&":2,"<tag>&":1`, `"<tag>&":1,"\u003ctag>&":2`} {
+		cases = append(cases, strings.Replace(valid, `"<tag>&":1`, pair, 1))
 	}
 	var badRumors, badWraps []string
 	var good string

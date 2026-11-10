@@ -127,7 +127,7 @@ func checkExtensions(ext map[string]json.RawMessage) (map[string]json.RawMessage
 		}
 		ordinary[k] = raw
 	}
-	raw, e := json.Marshal(ordinary)
+	raw, e := marshalEnvelope(ordinary)
 	if e != nil || len(raw) > maxOrdinaryExtensions {
 		return nil, seamError("content_too_large")
 	}

@@ -211,7 +211,11 @@ server text and received references are mapped to fixed closed errors.
 
 JSON keys on wrapper/seal/rumor, envelope/extension and persisted retry paths
 are checked recursively before interpretation. Duplicate and escaped key
-spellings are refused; legal string value escapes remain supported. See
+spellings are refused; legal string value escapes remain supported. New sends
+and receive caches preserve literal `<`, `>` and `&` extension keys. Top-level
+extension keys containing U+2028/U+2029, quotes, backslashes or control characters
+still refuse. v0.2.0 messages with escaped keys (including `\u003c`, `\u003e`,
+`\u0026`, `\u2028`, `\u2029`) remain incompatible and are dropped. See
 [STRICT-JSON.md](STRICT-JSON.md) for the decoder inventory, bounds and controls.
 
 ## Tools and checks
