@@ -30,7 +30,7 @@ func (t *Transport) stateFor(cursor transport.Cursor) (cursorState, error) {
 		return cur, nil
 	}
 	var c cursorState
-	if err := json.Unmarshal(cursor, &c); err != nil {
+	if err := strictJSON(cursor, &c); err != nil {
 		return cur, fmt.Errorf("nostrtransport: bad cursor: %w", err)
 	}
 	c.Tombstones = cur.Tombstones

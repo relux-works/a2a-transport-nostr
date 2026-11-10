@@ -209,6 +209,11 @@ server text and received references are mapped to fixed closed errors.
   prototype API, retained with its existing regression tests. Its old
   capabilities and cursor semantics are not the new seam's contract.
 
+JSON keys on wrapper/seal/rumor, envelope/extension and persisted retry paths
+are checked recursively before interpretation. Duplicate and escaped key
+spellings are refused; legal string value escapes remain supported. See
+[STRICT-JSON.md](STRICT-JSON.md) for the decoder inventory, bounds and controls.
+
 ## Tools and checks
 
 Go is the only implementation/test language. All tests use local relay and
@@ -223,6 +228,7 @@ go test -race -count=1 ./...
 go test -count=1 ./nostrtransport -run '^TestUpstreamConformance$' -v
 go build -trimpath ./...
 go run .scripts/check-guards.go -out .temp/controls-01
+go run .scripts/sj1-guards.go -out "$(pwd -P)/.temp/sj1-controls-01"
 ```
 
 CI checks the canonical module identity before downloading and verifying the
@@ -245,6 +251,11 @@ subprocess control.
 Formatting is owned by the pinned upstream MediaRef type; local controls no
 longer mutate its deleted provisional implementation. The log-disclosure
 control still plants a real adapter log call. Guard logs belong under `.temp/`.
+
+`.scripts/sj1-guards.go` runs calibrated JSON decoder overlays with passing
+baselines and intended failure witnesses. Logs, source/mutant hashes and child
+PIDs go to the new absolute output directory. Run all checks in an isolated
+checkout with absolute scratch-owned HOME, cwd, caches and temp directories.
 
 Grant tests cover the exact decoded bound (16385 bytes has the same base64
 length as 16384), unchanged ordinary-extension bounds with and without grants,

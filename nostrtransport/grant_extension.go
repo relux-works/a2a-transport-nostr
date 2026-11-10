@@ -7,6 +7,7 @@ import (
 	"io"
 	"unicode/utf8"
 
+	"github.com/relux-works/a2a-transport-nostr/internal/strictjson"
 	"github.com/relux-works/a2a-transport-nostr/nostr"
 	"github.com/relux-works/a2a-transport-nostr/relay"
 )
@@ -58,6 +59,9 @@ func DecodeGrantPresentation(raw json.RawMessage) (GrantPresentationV1, error) {
 	if len(raw) > maxGrantExtensionJSON {
 		return p, seamError("content_too_large")
 	}
+	if strictjson.Validate(raw) != nil {
+		return p, seamError("invalid_reference")
+	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	token, e := d.Token()
 	if e != nil || token != json.Delim('{') {
@@ -67,7 +71,7 @@ func DecodeGrantPresentation(raw json.RawMessage) (GrantPresentationV1, error) {
 	for d.More() {
 		token, e = d.Token()
 		key, ok := token.(string)
-		if e != nil || !ok || seen[key] {
+		if e != nil || !ok {
 			return GrantPresentationV1{}, seamError("invalid_reference")
 		}
 		seen[key] = true
@@ -115,6 +119,9 @@ func checkExtensions(ext map[string]json.RawMessage) (map[string]json.RawMessage
 			}
 			continue
 		}
+		if strictjson.Validate(raw) != nil {
+			return nil, seamError("invalid_reference")
+		}
 		if ordinary == nil {
 			ordinary = make(map[string]json.RawMessage)
 		}
@@ -123,6 +130,9 @@ func checkExtensions(ext map[string]json.RawMessage) (map[string]json.RawMessage
 	raw, e := json.Marshal(ordinary)
 	if e != nil || len(raw) > maxOrdinaryExtensions {
 		return nil, seamError("content_too_large")
+	}
+	if strictjson.Validate(raw) != nil {
+		return nil, seamError("invalid_reference")
 	}
 	return ordinary, nil
 }

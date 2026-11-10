@@ -163,12 +163,18 @@ func (t *Transport) publishRecord(ctx context.Context, idempotencyKey string, re
 		recipients = append(recipients, r)
 	}
 	sortStrings(recipients)
+	// Validate the entire persisted batch before publishing or recording progress:
+	// a corrupt later recipient must not cause an earlier partial publish.
+	parsed := make(map[string]*nostr.Event, len(recipients))
 	for _, recipient := range recipients {
-		raw := rec.Wraps[recipient]
-		var wrap nostr.Event
-		if err := json.Unmarshal(raw, &wrap); err != nil {
+		wrap, err := nostr.ParseEvent(rec.Wraps[recipient])
+		if err != nil {
 			return rec.RumorID, transport.AckUnknown, err
 		}
+		parsed[recipient] = wrap
+	}
+	for _, recipient := range recipients {
+		wrap := parsed[recipient]
 		if rec.Stored[wrap.ID] {
 			continue
 		}
@@ -176,7 +182,7 @@ func (t *Transport) publishRecord(ctx context.Context, idempotencyKey string, re
 		for _, url := range t.resolve(ctx, recipient) {
 			c := t.clientFor(url)
 			pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			res, err := c.Publish(pctx, &wrap)
+			res, err := c.Publish(pctx, wrap)
 			cancel()
 			if err == nil && res.Stored() {
 				acks++

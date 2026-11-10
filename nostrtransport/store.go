@@ -147,7 +147,7 @@ func (s *store) loadSend(idempotencyKey string) (*sendRecord, bool, error) {
 		return nil, false, err
 	}
 	var rec sendRecord
-	if err := json.Unmarshal(raw, &rec); err != nil {
+	if err := strictJSON(raw, &rec); err != nil {
 		return nil, false, err
 	}
 	return &rec, true, nil
@@ -174,7 +174,7 @@ func (s *store) loadCursor() (cursorState, error) {
 		return cursorState{}, err
 	}
 	var c cursorState
-	return c, json.Unmarshal(raw, &c)
+	return c, strictJSON(raw, &c)
 }
 
 func (s *store) saveCursor(c cursorState) error {

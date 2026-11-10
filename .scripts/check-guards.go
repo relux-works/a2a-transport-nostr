@@ -60,8 +60,8 @@ func main() {
 		{"rumor-seal-mismatch", "nostr/nip59.go", "if rumor.PubKey != seal.PubKey {", "if false && rumor.PubKey != seal.PubKey {", "TestUpstreamConformance/unverifiable_sender", "unverifiable sender delivered"},
 		{"oversize", "nostrtransport/adapter_send.go", "len(baseRaw) > baseMaxContent", "len(baseRaw) > baseMaxContent+1", "TestSeamEscapedBoundAndMetadata", "bound+1 submitted"},
 		{"grant-decoded-bound", "nostrtransport/grant_extension.go", "len(p.Bytes) > MaxGrantPresentationBytes", "len(p.Bytes) > MaxGrantPresentationBytes+1", "TestGrantDecodedBoundary", "oversized decoded grant encoded"},
-		{"grant-ordinary-bound", "nostrtransport/grant_extension.go", "len(raw) > maxOrdinaryExtensions", "len(raw) > maxOrdinaryExtensions+1", "TestGrantSendBudgets", "invalid grant message reached wire or wrong refusal"},
-		{"grant-duplicate-field", "nostrtransport/grant_extension.go", "!ok || seen[key]", "!ok", "TestGrantMalformedCarrier/duplicate", "malformed carrier accepted"},
+		{"grant-ordinary-bound", "nostrtransport/grant_extension.go", "e != nil || len(raw) > maxOrdinaryExtensions", "e != nil || len(raw) > maxOrdinaryExtensions+1", "TestGrantSendBudgets", "invalid grant message reached wire or wrong refusal"},
+		{"grant-duplicate-field", "nostrtransport/grant_extension.go", "if strictjson.Validate(raw) != nil {\n\t\treturn p,", "if false {\n\t\treturn p,", "TestGrantMalformedCarrier/duplicate", "malformed carrier accepted"},
 		{"grant-nested-size", "nostrtransport/grant_extension.go", "nostr.NIP44PayloadSize(1024 + sealContent)", "nostr.NIP44PayloadSize(len(raw)); _ = sealContent", "TestGrantNestedPreflight", "oversized nested envelope passed preflight"},
 		{"backdate-window", "nostrtransport/adapter_sync.go", "c.Checkpoint-syncWindow", "c.Checkpoint-60", "TestUpstreamConformance/resume_backdated_history", "want exactly one"},
 		{"history-missing-fields", "nostrtransport/adapter_sync.go", "h.Version != 1 || h.Identity != a.core.Identity() || h.Conversation != c || h.Offset < 1 || h.Offset >= len(h.IDs) || h.IDs == nil", "false", "TestSeamHistoryMissingFields", "incomplete history cursor accepted or used on wire"},
@@ -74,7 +74,7 @@ func main() {
 	for _, p := range plants {
 		dir := filepath.Join(dest, p.Name)
 		must(os.Mkdir(dir, 0700))
-		for _, name := range []string{"nostrtransport", "nostr", "relay", "blossom", "transport", "testrelay", "testblossom", "go.mod", "go.sum"} {
+		for _, name := range []string{"nostrtransport", "nostr", "relay", "blossom", "transport", "testrelay", "testblossom", "internal", "go.mod", "go.sum"} {
 			must(copyTree(filepath.Join(root, name), filepath.Join(dir, name)))
 		}
 		if p.Name == "media-log-leak" {

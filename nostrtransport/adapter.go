@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/relux-works/a2a-transport-nostr/internal/strictjson"
 	"github.com/relux-works/a2a-transport-nostr/nostr"
 	"github.com/relux-works/a2a-transport-nostr/relay"
 )
@@ -299,12 +300,7 @@ func (a *Adapter) conversation(c ConversationID) (convJSON, error) {
 	return v, nil
 }
 func strictJSON(raw []byte, v any) error {
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.DisallowUnknownFields()
-	if e := d.Decode(v); e != nil {
-		return e
-	}
-	if d.Decode(new(any)) != io.EOF {
+	if strictjson.Unmarshal(raw, v) != nil {
 		return seamError("invalid_reference")
 	}
 	return nil

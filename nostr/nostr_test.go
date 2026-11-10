@@ -21,6 +21,18 @@ func TestNIP01KnownEvent(t *testing.T) {
 	if err := VerifySignature(ev); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
+	// SJ1 third-party compatibility control: this published event is independent
+	// of our signer. Legal value escapes/spacing preserve its original signature.
+	spaced := " \n" + strings.Replace(raw, "https://", `https:\/\/`, 1) + "\n"
+	other, err := ParseEvent([]byte(spaced))
+	if err != nil || !other.CheckID() || VerifySignature(other) != nil {
+		t.Fatal("third-party event encoding refused", err)
+	}
+	for _, field := range []string{`"kind":1,"kind":0`, `"kind":0,"kind":1`, `"kind":1,"k\u0069nd":0`, `"k\u0069nd":1`} {
+		if got, err := ParseEvent([]byte(strings.Replace(raw, `"kind":1`, field, 1))); err == nil || got != nil {
+			t.Fatal("ambiguous third-party event admitted")
+		}
+	}
 	// Tampered content must fail id (and therefore signature) checks.
 	bad := *ev
 	bad.Content += "x"

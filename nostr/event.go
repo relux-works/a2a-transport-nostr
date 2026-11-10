@@ -6,12 +6,13 @@
 package nostr
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
+
+	"github.com/relux-works/a2a-transport-nostr/internal/strictjson"
 )
 
 // Event kinds used by this module.
@@ -125,20 +126,12 @@ func (e Event) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire{e.ID, e.PubKey, e.CreatedAt, e.Kind, tags, e.Content, e.Sig})
 }
 
-// ParseEvent strictly decodes one event: unknown fields, duplicate
-// top-level keys, trailing data and malformed hex/lengths are refused.
+// ParseEvent refuses duplicate/escaped keys and exact-field aliases before
+// signature processing. String values retain their ordinary JSON encoding.
 func ParseEvent(raw []byte) (*Event, error) {
-	if err := rejectDuplicateTopKeys(raw); err != nil {
-		return nil, err
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
 	var e Event
-	if err := dec.Decode(&e); err != nil {
-		return nil, fmt.Errorf("event json: %w", err)
-	}
-	if dec.More() {
-		return nil, fmt.Errorf("event json: trailing data")
+	if err := strictjson.Unmarshal(raw, &e); err != nil {
+		return nil, fmt.Errorf("event json: invalid shape")
 	}
 	if err := e.ValidateShape(); err != nil {
 		return nil, err
@@ -167,36 +160,6 @@ func (e *Event) ValidateShape() error {
 	for _, tag := range e.Tags {
 		if len(tag) == 0 {
 			return fmt.Errorf("event tag: empty tag")
-		}
-	}
-	return nil
-}
-
-// rejectDuplicateTopKeys scans the top-level JSON object keys and
-// refuses duplicates (encoding/json would otherwise keep the last).
-func rejectDuplicateTopKeys(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	tok, err := dec.Token()
-	if err != nil {
-		return fmt.Errorf("event json: %w", err)
-	}
-	if d, ok := tok.(json.Delim); !ok || d != '{' {
-		return fmt.Errorf("event json: not an object")
-	}
-	seen := map[string]bool{}
-	for dec.More() {
-		ktok, err := dec.Token()
-		if err != nil {
-			return fmt.Errorf("event json: %w", err)
-		}
-		key, _ := ktok.(string)
-		if seen[key] {
-			return fmt.Errorf("event json: duplicate key %q", key)
-		}
-		seen[key] = true
-		var skip json.RawMessage
-		if err := dec.Decode(&skip); err != nil {
-			return fmt.Errorf("event json: %w", err)
 		}
 	}
 	return nil

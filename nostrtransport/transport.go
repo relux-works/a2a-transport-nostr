@@ -155,7 +155,7 @@ func (t *Transport) NewConversation(others []string, subject string) transport.C
 
 func parseConversation(id transport.ConversationID) (convJSON, error) {
 	var c convJSON
-	if len(id) == 0 || json.Unmarshal(id, &c) != nil || len(c.P) == 0 {
+	if len(id) == 0 || strictJSON(id, &c) != nil || len(c.P) == 0 {
 		return c, ErrBadConversation
 	}
 	c.P = nostr.SortedUnique(c.P)
