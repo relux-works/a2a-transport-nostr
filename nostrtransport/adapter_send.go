@@ -25,7 +25,7 @@ type wireMessage struct {
 
 func toWire(m Message) (wireMessage, error) {
 	w := wireMessage{Version: 1, Kind: m.Kind, Text: m.Text, To: m.To, Re: m.Re, Thread: m.Thread, Extensions: m.Extensions}
-	if !utf8.ValidString(m.Text) || len(m.Text) > seamMaxContent {
+	if !utf8.ValidString(m.Text) || len(m.Text) > baseMaxContent {
 		return w, seamError("content_too_large")
 	}
 	if len(m.Kind) > 64 || !utf8.ValidString(m.Kind) || len(m.To) > maxParties || len(m.Attachments) > 1 {
@@ -43,14 +43,15 @@ func toWire(m Message) (wireMessage, error) {
 		}
 		w.Media = append(w.Media, json.RawMessage(raw))
 	}
-	extra, e := json.Marshal(m.Extensions)
-	if e != nil || len(extra) > 1024 {
-		return w, seamError("content_too_large")
+	ordinary, e := checkExtensions(m.Extensions)
+	if e != nil {
+		return w, e
 	}
-	for k := range m.Extensions {
-		if len(k) > 128 || !utf8.ValidString(k) {
-			return w, seamError("invalid_reference")
-		}
+	base := w
+	base.Extensions = ordinary
+	baseRaw, e := json.Marshal(base)
+	if e != nil || len(baseRaw) > baseMaxContent {
+		return w, seamError("content_too_large")
 	}
 	raw, err := json.Marshal(w)
 	if err != nil || len(raw) > seamMaxContent {
@@ -155,6 +156,11 @@ func (a *Adapter) Send(ctx context.Context, req SendRequest) (SendResult, error)
 		}
 		rumor.Tags = append(rumor.Tags, []string{"a2a-txn", digest([]byte(req.IdempotencyKey))})
 		rumor.ID = rumor.ComputeID()
+		// Bound both nested NIP-44 plaintexts and the final relay frame before
+		// the first encryption, signature, route discovery or journal write.
+		if e := preflightEnvelopeSize(rumor); e != nil {
+			return SendResult{}, e
+		}
 		rec = seamSend{Version: 1, Identity: a.core.Identity(), Hash: hash, Conversation: req.Conversation, Rumor: rumor, Parts: map[string]*seamPart{}}
 		// Build/size-check every cryptographic layer before any discovery or publish.
 		for _, p := range targets {

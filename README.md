@@ -14,11 +14,11 @@ Consumers import the adapter as:
 import "github.com/relux-works/a2a-transport-nostr/nostrtransport"
 ```
 
-After the reviewed `v0.1.0` tag is published, add the dependency from the
+After the reviewed `v0.2.0` tag is published, add the dependency from the
 consumer's module root:
 
 ```sh
-go get github.com/relux-works/a2a-transport-nostr@v0.1.0
+go get github.com/relux-works/a2a-transport-nostr@v0.2.0
 ```
 
 Use the published module directly, without a checkout-local `replace`. The
@@ -146,18 +146,43 @@ boundary; no transport result, drop count or Raw is fabricated.
   no optional extension interfaces. Canonical addressing is lowercase hex
   public keys and canonical participant/subject JSON, built with
   `ConversationFor`; display names and Matrix shortcuts are not identities.
-- The 4096-byte content budget counts the serialized inner `wireMessage` JSON
-  envelope, including escaped text and all metadata/attachments/extensions.
-  It is not a 4096-character text allowance. `MessageAtSize` measures that
-  encoding; exact-bound and bound+1 neighbors exercise it. Outer NIP-44/59
-  encryption layers are additionally checked against their protocol limits
-  before discovery/publication. Conversations contain at most 16 participants
-  including self, with subjects up to 128 bytes.
+- Removing the dedicated `swarma.grant.v1` extension must leave a serialized
+  `wireMessage` JSON envelope of at most 4096 bytes, including escaped text,
+  metadata, attachments and ordinary extensions. Ordinary extensions retain
+  their aggregate 1024-byte serialized-object limit. These are byte limits,
+  not character allowances. Only the dedicated grant field receives additional
+  space in `Caps().MaxContentBytes`; other fields cannot borrow its allowance.
+  `MessageAtSize` exercises the advertised maximum with a maximum-size grant.
+  Both NIP-44 plaintext lengths and final relay framing are bounded before the
+  first encryption/signature, route discovery or send journal write.
+  Conversations contain at most 16 participants including self, with subjects
+  up to 128 bytes. Receive/cache, relay, cursor and journal caps are unchanged.
 - Operations honor cancellation and closed state with fixed `unavailable`
   errors; cancellation after a publication yields UNKNOWN and stops pending
   writes. Pure Caps/Addressing/Format remain usable after Close. Sync requests
   available events immediately (no long polling); EOSE/network waits have
   per-relay timeouts bounded by the call context.
+
+### Typed grant carrier
+
+`GrantPresentationV1` is an untrusted transport carrier: `v` must be 1,
+`grant_id` must be 64 lowercase hex characters, and `bytes` contains canonical
+padded standard base64 for 1 through 16384 decoded bytes. Use
+`EncodeGrantPresentation` and insert its result under `GrantExtension` in
+`Message.Extensions`; `DecodeGrantPresentation` checks shape and size. Duplicate,
+unknown or missing fields, other versions, invalid IDs and malformed/noncanonical
+base64 refuse. Only the exact reserved extension key gets the enlarged budget;
+version-like neighbors remain ordinary extensions. Oversize values return
+`content_too_large`; malformed carriers return `invalid_reference`.
+
+The adapter does not parse certificates, verify a grant ID against its bytes,
+admit a peer or cache an authorization verdict. Admission remains the caller's
+responsibility using the authenticated seal sender. The carrier never moves
+grant data into human-authored `Message.Text`. Inbound messages use the same
+carrier and base-message checks after NIP-17 authentication; rejected events
+are dropped without being cached. Older adapters may reject the new carrier
+under their former 1024-byte extension limit; there is no capability negotiation
+or silent truncation.
 
 ### Media
 
@@ -220,6 +245,15 @@ subprocess control.
 Formatting is owned by the pinned upstream MediaRef type; local controls no
 longer mutate its deleted provisional implementation. The log-disclosure
 control still plants a real adapter log call. Guard logs belong under `.temp/`.
+
+Grant tests cover the exact decoded bound (16385 bytes has the same base64
+length as 16384), unchanged ordinary-extension bounds with and without grants,
+signed inbound rejection with a valid neighbor, real nested NIP-17 delivery,
+maximum metadata/file delivery and sender/recipient restart. Length prediction
+is compared with actual NIP-44 encryption at padding transitions and neighbors.
+Grant guard plants relax the decoded and ordinary bounds, accept duplicate
+fields, or underestimate the second encryption layer; each must fail its named
+assertion. These tests verify transport shape and persistence, not grant authority.
 
 ## License
 

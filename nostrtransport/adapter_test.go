@@ -241,8 +241,14 @@ func upstreamFixture(t *testing.T) *conformancetest.Fixture {
 // The public limit counts the serialized inner transport envelope, not text
 // characters. Outer NIP-44/59 layers have separate protocol size checks.
 func messageAtSize(n int) Message {
-	raw, _ := json.Marshal(wireMessage{Version: 1, Text: ""})
-	return Message{Text: strings.Repeat("x", max(0, n-len(raw)))}
+	m := Message{}
+	if n > baseMaxContent {
+		grant, _ := EncodeGrantPresentation(GrantPresentationV1{Version: 1, GrantID: strings.Repeat("a", 64), Bytes: bytes.Repeat([]byte{1}, MaxGrantPresentationBytes)})
+		m.Extensions = map[string]json.RawMessage{GrantExtension: grant}
+	}
+	raw, _ := json.Marshal(wireMessage{Version: 1, Text: "", Extensions: m.Extensions})
+	m.Text = strings.Repeat("x", max(0, n-len(raw)))
+	return m
 }
 func mustSend(t *testing.T, w *seamWorld, key, text string) SendResult {
 	t.Helper()
@@ -370,11 +376,11 @@ func TestSeamStateAndConflict(t *testing.T) {
 // Exact content boundary includes JSON-escape worst cases through both NIP44 layers.
 func TestSeamEscapedBoundAndMetadata(t *testing.T) {
 	w := newSeamWorld(t)
-	for i, text := range []string{messageAtSize(seamMaxContent).Text, strings.Repeat("\x00", 600), strings.Repeat("\\", 1800)} {
+	for i, text := range []string{messageAtSize(baseMaxContent).Text, strings.Repeat("\x00", 600), strings.Repeat("\\", 1800)} {
 		mustSend(t, w, fmt.Sprint(i), text)
 	}
 	n := w.r.Calls()
-	_, e := w.a.Send(context.Background(), SendRequest{Conversation: w.conv, Message: Message{Text: strings.Repeat("x", seamMaxContent+1)}, IdempotencyKey: "over"})
+	_, e := w.a.Send(context.Background(), SendRequest{Conversation: w.conv, Message: Message{Text: messageAtSize(baseMaxContent).Text + "x"}, IdempotencyKey: "over"})
 	if seam.Code(e) != "content_too_large" || w.r.Calls() != n {
 		t.Fatal("bound+1 submitted")
 	}

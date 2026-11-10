@@ -25,7 +25,10 @@ const (
 	// Two nested NIP44 encryptions: the signed seal JSON must also fit 65535.
 	// Bound the serialized inner JSON envelope, including escaped text/metadata.
 	// Check the actual outer cryptographic layers against their protocol limits too.
-	seamMaxContent = 4096
+	baseMaxContent = 4096
+	// Only the dedicated grant field receives additional wire space. Removing
+	// it must leave a message that fits the original content/extension budgets.
+	seamMaxContent = baseMaxContent + maxGrantWireOverhead
 	maxParties     = 16
 	maxMedia       = 8 << 20
 	syncWindow     = int64((48*time.Hour + 15*time.Minute) / time.Second)

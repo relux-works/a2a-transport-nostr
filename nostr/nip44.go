@@ -81,6 +81,15 @@ func nip44PaddedLen(n int) int {
 	return chunk * ((n-1)/chunk + 1)
 }
 
+// NIP44PayloadSize returns the encoded ciphertext length without generating
+// randomness or performing encryption. Invalid plaintext sizes are refused.
+func NIP44PayloadSize(plaintextBytes int) (int, error) {
+	if plaintextBytes < nip44MinPlaintext || plaintextBytes > nip44MaxPlaintext {
+		return 0, fmt.Errorf("nip44: plaintext length out of range")
+	}
+	return base64.StdEncoding.EncodedLen(1 + 32 + 2 + nip44PaddedLen(plaintextBytes) + 32), nil
+}
+
 // EncryptNIP44 encrypts plaintext under a conversation key. A zero
 // nonce means a fresh crypto/rand nonce; a nonzero nonce is used
 // verbatim (test vectors).
